@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>xArm Hold Control</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="left">
+        <div class="title">xArm Control</div>
+        <div class="status">
+          <span class="dot" id="connDot"></span>
+          <span id="connLabel">Disconnected</span>
+          <span class="sep">|</span>
+          <span class="k">State</span><span id="stateLabel">-</span>
+          <span class="k">Mode</span><span id="modeLabel">-</span>
+          <span class="k">Err</span><span id="errLabel">-</span>
+        </div>
+      </div>
+
+      <div class="right">
+        <input id="ipInput" class="ip" type="text" placeholder="Robot IP (örn. 192.168.1.10)" />
+        <button id="connectBtn" class="btn">Connect</button>
+        <button id="disconnectBtn" class="btn">Disconnect</button>
+
+        <button id="enableBtn" class="btn btn-primary">Enable</button>
+        <button id="disableBtn" class="btn">Disable</button>
+        <button id="stopBtn" class="btn btn-danger">STOP</button>
+
+        <button id="homeBtn" class="btn">Home</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="panel">
+
+        <div class="bar">
+          <div class="bar-item">
+            <label for="frameSelect">Jog Frame</label>
+            <select id="frameSelect">
+              <option value="base" selected>Base</option>
+              <option value="tool">Tool</option>
+            </select>
+          </div>
+
+          <div class="bar-item grow">
+            <label for="speedRange">Speed</label>
+            <div class="range-row">
+              <input id="speedRange" type="range" min="1" max="100" value="50" />
+              <div class="range-val" id="speedVal">50%</div>
+            </div>
+          </div>
+
+          <div class="bar-item">
+            <label for="rateSelect">Hold rate</label>
+            <select id="rateSelect">
+              <option value="60">60ms</option>
+              <option value="80">80ms</option>
+              <option value="120" selected>120ms</option>
+              <option value="160">160ms</option>
+              <option value="220">220ms</option>
+            </select>
+          </div>
+
+          <div class="bar-item">
+            <label for="xyzStep">XYZ step</label>
+            <input id="xyzStep" type="number" value="5" />
+            <span class="unit">mm</span>
+          </div>
+
+          <div class="bar-item">
+            <label for="rpyStep">R step</label>
+            <input id="rpyStep" type="number" value="2" />
+            <span class="unit">deg</span>
+          </div>
+        </div>
+
+        <div class="pads">
+          <!-- LEFT: XYZ -->
+          <div class="pad-block">
+            <div class="top-buttons">
+              <button class="pill hold" data-axis="z" data-dir="-" data-kind="xyz">Z-</button>
+              <button class="pill hold" data-axis="z" data-dir="+" data-kind="xyz">Z+</button>
+            </div>
+
+            <div class="ring small">
+              <button class="ring-btn hold top" data-axis="x" data-dir="+" data-kind="xyz">X+</button>
+              <button class="ring-btn hold right" data-axis="y" data-dir="-" data-kind="xyz">Y-</button>
+              <button class="ring-btn hold left" data-axis="y" data-dir="+" data-kind="xyz">Y+</button>
+              <button class="ring-btn hold bottom" data-axis="x" data-dir="-" data-kind="xyz">X-</button>
+              <div class="center">XYZ</div>
+            </div>
+          </div>
+
+          <!-- CENTER: CAMERA -->
+          <div class="camera-block">
+            <div class="camera-card">
+              <div class="camera-title">Camera</div>
+              <img id="camFeed" src="/camera" alt="camera" />
+            </div>
+
+            <div class="telemetry-card">
+              <div class="trow"><span class="k">X</span><span id="xLabel">-</span><span class="u">mm</span></div>
+              <div class="trow"><span class="k">Y</span><span id="yLabel">-</span><span class="u">mm</span></div>
+              <div class="trow"><span class="k">Z</span><span id="zLabel">-</span><span class="u">mm</span></div>
+
+              <div class="trow"><span class="k">Roll</span><span id="rollLabel">-</span><span class="u">°</span></div>
+              <div class="trow"><span class="k">Pitch</span><span id="pitchLabel">-</span><span class="u">°</span></div>
+              <div class="trow"><span class="k">Yaw</span><span id="yawLabel">-</span><span class="u">°</span></div>
+
+              <div class="trow"><span class="k">Joints</span><span id="jointsShort">-</span></div>
+            </div>
+          </div>
+
+          <!-- RIGHT: RXYZ -->
+          <div class="pad-block">
+            <div class="top-buttons right-top">
+              <button class="pill hold" data-axis="rz" data-dir="-" data-kind="rpy">RZ-</button>
+              <button class="pill hold" data-axis="rz" data-dir="+" data-kind="rpy">RZ+</button>
+            </div>
+
+            <div class="grip-panel">
+              <div class="grip-title">Gripper</div>
+              <div class="grip-row">
+                <button id="gripOpen" class="gbtn hold" data-grip="open">OPEN</button>
+                <button id="gripClose" class="gbtn hold" data-grip="close">CLOSE</button>
+              </div>
+              <div class="grip-status">
+                <span id="gripPos">-</span>
+              </div>
+            </div>
+
+            <div class="ring small">
+              <button class="ring-btn hold top" data-axis="ry" data-dir="+" data-kind="rpy">RY+</button>
+              <button class="ring-btn hold right" data-axis="rx" data-dir="+" data-kind="rpy">RX+</button>
+              <button class="ring-btn hold left" data-axis="rx" data-dir="-" data-kind="rpy">RX-</button>
+              <button class="ring-btn hold bottom" data-axis="ry" data-dir="-" data-kind="rpy">RY-</button>
+              <div class="center">RXYZ</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="footer-note">
+          <span id="errorLabel">-</span>
+        </div>
+
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
