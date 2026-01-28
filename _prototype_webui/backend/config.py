@@ -21,7 +21,7 @@ class AppConfig:
     gripper_step: int = 30
 
     # Camera
-    camera_index: int = 0
+    camera_index: int = 2
     camera_width: int = 640
     camera_height: int = 360
     camera_fps: int = 30

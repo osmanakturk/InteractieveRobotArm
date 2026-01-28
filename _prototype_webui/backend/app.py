@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 from flask import Flask, jsonify, request, send_from_directory, render_template, Response
+from flask_socketio import SocketIO
+
 
 from config import CONFIG
 from robot_controller import RobotController
@@ -22,6 +24,10 @@ app = Flask(
     static_folder=str(FRONTEND_STATIC),
     static_url_path="/static",
 )
+socketio = SocketIO(app=app)
+
+
+
 
 robot = RobotController()
 camera = CameraStreamer()
@@ -176,4 +182,5 @@ def api_status():
 
 
 if __name__ == "__main__":
-    app.run(host=CONFIG.host, port=CONFIG.port, debug=CONFIG.debug)
+    #app.run(host=CONFIG.host, port=CONFIG.port, debug=CONFIG.debug)
+    socketio.run(host=CONFIG.host, port=CONFIG.port, debug=CONFIG.debug)

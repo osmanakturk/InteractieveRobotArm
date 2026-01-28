@@ -1,7 +1,7 @@
 # backend/camera.py
 import time
 from typing import Generator, Optional
-
+import numpy as np
 import cv2
 
 from config import CONFIG
@@ -35,7 +35,7 @@ class CameraStreamer:
         """MJPEG generator."""
         if not self.open():
             # return a basic error frame
-            import numpy as np
+            
             img = np.zeros((CONFIG.camera_height, CONFIG.camera_width, 3), dtype=np.uint8)
             cv2.putText(img, "Camera not available", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             ok, jpg = cv2.imencode(".jpg", img)
