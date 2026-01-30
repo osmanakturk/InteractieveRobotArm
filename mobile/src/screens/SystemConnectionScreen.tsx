@@ -22,6 +22,17 @@ function normalizeBaseUrl(input: string) {
 }
 
 export default function SystemConnectionScreen({ navigation }: any) {
+  
+  useEffect(() => {
+      const t = setTimeout(()=>{
+        navigation.replace('RobotConnect');
+      }, 5000);
+    
+      return () => clearTimeout(t);
+    }, [navigation])
+  
+  
+  
   const [host, setHost] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
@@ -30,6 +41,8 @@ export default function SystemConnectionScreen({ navigation }: any) {
   const requestIdRef = useRef(0);
 
   const isConnecting = status === "connecting";
+
+    
 
   function cancel(reason?: string) {
     if (abortRef.current) {

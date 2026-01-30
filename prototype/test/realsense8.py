@@ -7,7 +7,7 @@ import random
 # --- 1. AYARLAR ---
 # DİKKAT: Segmentasyon için '-seg' uzantılı modeli kullanıyoruz.
 # İlk çalıştırmada otomatik indirilecektir.
-model = YOLO('./test/yolov26n-seg.pt')
+model = YOLO('./test/yolo26n-seg.pt')
 
 pipeline = rs.pipeline()
 config = rs.config()
@@ -122,7 +122,7 @@ try:
         # 0.6 ana resim netliği, 0.4 maske saydamlığı.
         cv2.addWeighted(overlay, 0.4, color_image, 0.6, 0, color_image)
 
-        cv2.imshow('RealSense + YOLOv8 Segmentation + 5x5 Depth', color_image)
+        cv2.imshow('RealSense + YOLO Segmentation + Depth', color_image)
         # ESC tuşu (27) ile çıkış
         if cv2.waitKey(1) & 0xFF == 27:
             break

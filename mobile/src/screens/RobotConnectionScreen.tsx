@@ -18,6 +18,18 @@ function normalizeRobotIp(input: string) {
 }
 
 export default function RobotConnectionScreen({ navigation, route }: any) {
+
+useEffect(() => {
+      const t = setTimeout(()=>{
+        navigation.replace('ModeSelect');
+      }, 5000);
+    
+      return () => clearTimeout(t);
+    }, [navigation])
+
+
+
+
   const baseUrl: string = route?.params?.baseUrl; // Jetson baseUrl from previous screen
 
   const [robotIp, setRobotIp] = useState("");
