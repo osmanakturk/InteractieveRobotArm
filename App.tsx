@@ -3,7 +3,8 @@ import { StyleSheet, Text, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import SplashScreen from './src/screens/SplashScreen';
-import ConnectionScreen from './src/screens/ConnectionScreen';
+import RobotConnectionScreen from './src/screens/RobotConnectionScreen';
+import SystemConnectionScreen from './src/screens/SystemConnectionScreen';
 import ModeSelectionScreen from './src/screens/ModeSelectionScreen';
 import ManualControlScreen from "./src/screens/ManualControlScreen";
 import PickPlaceScreen from "./src/screens/PickPlaceScreen";
@@ -19,7 +20,8 @@ export default function App() {
     <NavigationContainer>
       <Stack.Navigator initialRouteName="Splash" screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Splash" component={SplashScreen} />
-        <Stack.Screen name="Connect" component={ConnectionScreen} />
+        <Stack.Screen name="SystemConnect" component={SystemConnectionScreen} />
+        <Stack.Screen name="RobotConnect" component={RobotConnectionScreen} />
         <Stack.Screen name="ModeSelect" component={ModeSelectionScreen} />
         <Stack.Screen name="Manual" component={ManualControlScreen} />
         <Stack.Screen name="PickPlace" component={PickPlaceScreen} />

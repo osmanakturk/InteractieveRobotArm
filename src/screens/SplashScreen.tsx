@@ -6,7 +6,7 @@ import React, { use, useEffect } from 'react'
 const SplashScreen = ({navigation}:any) => {
     useEffect(() => {
       const t = setTimeout(()=>{
-        navigation.replace('Connect');
+        navigation.replace('SystemConnect');
       }, 1500);
     
       return () => clearTimeout(t);
