@@ -9,6 +9,7 @@ import ModeSelectionScreen from './src/screens/ModeSelectionScreen';
 import ManualControlScreen from "./src/screens/ManualControlScreen";
 import PickPlaceScreen from "./src/screens/PickPlaceScreen";
 import VoiceControlScreen from "./src/screens/VoiceControlScreen";
+import ServerPCConnectionScreen from "./src/screens/ServerPCConnectionScreen";
 
 
 const Stack = createNativeStackNavigator();
@@ -22,6 +23,7 @@ export default function App() {
         <Stack.Screen name="Splash" component={SplashScreen} />
         <Stack.Screen name="SystemConnect" component={SystemConnectionScreen} />
         <Stack.Screen name="RobotConnect" component={RobotConnectionScreen} />
+        <Stack.Screen name="ServerPCConnect" component={ServerPCConnectionScreen} />
         <Stack.Screen name="ModeSelect" component={ModeSelectionScreen} />
         <Stack.Screen name="Manual" component={ManualControlScreen} />
         <Stack.Screen name="PickPlace" component={PickPlaceScreen} />

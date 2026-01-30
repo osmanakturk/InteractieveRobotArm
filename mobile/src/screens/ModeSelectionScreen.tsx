@@ -12,7 +12,7 @@ import {
 type TileItem = {
   title: string;
   subtitle: string;
-  routeName: string;
+  routeName: "Manual" | "PickPlace" | "Voice";
   icon: any;
 };
 
@@ -32,7 +32,7 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
     const w = Math.floor((usable - gap * (cols - 1)) / cols);
 
     const tileWidth = Math.max(120, Math.min(w, 175));
-    const tileHeight = Math.floor(tileWidth * 0.78);
+    const tileHeight = Math.floor(tileWidth * 0.82); // biraz daha “card” hissi
 
     return { columns: cols, tileW: tileWidth, tileH: tileHeight };
   }, [width, isLandscape]);
@@ -69,32 +69,45 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
     return r;
   }, [tiles, columns]);
 
-const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
-  <Pressable
-    onPress={() => navigation.navigate(routeName, { baseUrl })}
-    style={({ pressed }) => [
-      styles.tile,
-      { width: tileW, height: tileH },
-      pressed ? styles.pressed : null,
-    ]}
-  >
-    {/* Image area (fixed height) */}
-    <View style={styles.tileImageArea}>
-      <Image source={icon} style={styles.tileImage} resizeMode="cover" />
-    </View>
+  const handleTilePress = (routeName: TileItem["routeName"]) => {
+    // Manual direkt
+    if (routeName === "Manual") {
+      navigation.navigate("Manual", { baseUrl });
+      return;
+    }
 
-    {/* Text area */}
-    <View style={styles.tileContent}>
-      <Text style={styles.tileTitle} numberOfLines={1}>
-        {title}
-      </Text>
-      <Text style={styles.tileSubtitle} numberOfLines={2}>
-        {subtitle}
-      </Text>
-    </View>
-  </Pressable>
-);
+    // PickPlace / Voice -> önce ServerPCConnect
+    navigation.navigate("ServerPCConnect", {
+      baseUrl,                 // Jetson baseUrl
+      nextRoute: routeName,    // "PickPlace" | "Voice"
+    });
+  };
 
+  const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
+    <Pressable
+      onPress={() => handleTilePress(routeName)}
+      style={({ pressed }) => [
+        styles.tile,
+        { width: tileW, height: tileH },
+        pressed ? styles.pressed : null,
+      ]}
+    >
+      {/* Image area (fixed portion) */}
+      <View style={styles.tileImageArea}>
+        <Image source={icon} style={styles.tileImage} resizeMode="cover" />
+      </View>
+
+      {/* Text area */}
+      <View style={styles.tileContent}>
+        <Text style={styles.tileTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        <Text style={styles.tileSubtitle} numberOfLines={2}>
+          {subtitle}
+        </Text>
+      </View>
+    </Pressable>
+  );
 
   return (
     <ImageBackground
@@ -114,7 +127,7 @@ const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
           {!!baseUrl && (
             <View style={styles.badge}>
               <Text style={styles.badgeText} numberOfLines={1}>
-                Connected to: {baseUrl}
+                Connected to Jetson: {baseUrl}
               </Text>
             </View>
           )}
@@ -128,6 +141,7 @@ const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
                   </View>
                 ))}
 
+                {/* Fill empty cells to keep alignment */}
                 {row.length < columns &&
                   Array.from({ length: columns - row.length }).map((_, i) => (
                     <View
@@ -140,8 +154,6 @@ const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
           </View>
 
           <View style={styles.actions}>
-
-
             <Pressable
               onPress={() =>
                 navigation.reset({
@@ -157,7 +169,7 @@ const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
               <Text style={styles.secondaryText}>Back to System Connection</Text>
             </Pressable>
 
-                        <Pressable
+            <Pressable
               onPress={() => navigation.navigate("RobotConnect", { baseUrl })}
               style={({ pressed }) => [
                 styles.secondaryBtn,
@@ -173,7 +185,7 @@ const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
       </View>
     </ImageBackground>
   );
-};
+}
 
 const styles = StyleSheet.create({
   bg: { flex: 1 },
@@ -226,50 +238,49 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  gridWrap: {
-    marginTop: 16,
-  },
+  gridWrap: { marginTop: 16 },
   row: {
     flexDirection: "row",
     justifyContent: "center",
     marginBottom: 10,
   },
-  cell: {
-    marginHorizontal: 5,
+  cell: { marginHorizontal: 5 },
+
+  tile: {
+    borderRadius: 16,
+    backgroundColor: "rgba(0,0,0,0.22)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    overflow: "hidden",
   },
-
-tile: {
-  borderRadius: 16,
-  backgroundColor: "rgba(0,0,0,0.22)",
-  borderWidth: 1,
-  borderColor: "rgba(255,255,255,0.10)",
-  overflow: "hidden",
-},
-
   pressed: {
     opacity: 0.9,
     transform: [{ scale: 0.99 }],
   },
-tileImageArea: {
-  flex: 1,
-  padding: 10,
-  justifyContent: "center",
-  alignItems: "center",
-  backgroundColor: "rgba(5, 10, 22, 0.20)", // hafif kontrast
-},
 
-tileImage: {
-  width: "100%",
-  height: "100%",
-},
-tileContent: {
-  paddingHorizontal: 12,
-  paddingVertical: 10,
-  borderTopWidth: 1,
-  borderTopColor: "rgba(255,255,255,0.08)",
-  backgroundColor: "rgba(5, 10, 22, 0.35)",
-},
+  // iconların “büyük gelme” sorununu çözen kısım:
+  tileImageArea: {
+    flex: 1,
+    padding: 0,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(5, 10, 22, 0.20)",
+  },
+  tileImage: {
+    width: "100%",
+    height: "100%",
+    //maxWidth: 110,      // çok büyümesini engeller
+    //maxHeight: 110,
+    //aspectRatio: 1,     // kare ikonları dengeler
+  },
 
+  tileContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "rgba(5, 10, 22, 0.35)",
+  },
 
   tileTitle: {
     color: "white",
