@@ -3,7 +3,7 @@ import React from 'react'
 
 const VoiceControlScreen = () => {
   return (
-    <View>
+    <View style={styles.container}>
       <Text>VoiceControlScreen</Text>
     </View>
   )
@@ -11,4 +11,11 @@ const VoiceControlScreen = () => {
 
 export default VoiceControlScreen
 
-const styles = StyleSheet.create({})
+const styles = StyleSheet.create({
+    container:{
+    flex:1,
+    justifyContent:'center',
+    alignItems:'center'
+  
+  }
+})
