@@ -1,12 +1,31 @@
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View } from 'react-native';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import SplashScreen from './src/screens/SplashScreen';
+import ConnectionScreen from './src/screens/ConnectionScreen';
+import ModeSelectionScreen from './src/screens/ModeSelectionScreen';
+import ManualControlScreen from "./src/screens/ManualControlScreen";
+import PickPlaceScreen from "./src/screens/PickPlaceScreen";
+import VoiceControlScreen from "./src/screens/VoiceControlScreen";
+
+
+const Stack = createNativeStackNavigator();
+
+
 
 export default function App() {
   return (
-    <View style={styles.container}>
-      <Text>InteractieveRobotArm app</Text>
-      <StatusBar style="auto" />
-    </View>
+    <NavigationContainer>
+      <Stack.Navigator initialRouteName="Splash" screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="Splash" component={SplashScreen} />
+        <Stack.Screen name="Connect" component={ConnectionScreen} />
+        <Stack.Screen name="ModeSelect" component={ModeSelectionScreen} />
+        <Stack.Screen name="Manual" component={ManualControlScreen} />
+        <Stack.Screen name="PickPlace" component={PickPlaceScreen} />
+        <Stack.Screen name="Voice" component={VoiceControlScreen} />
+      </Stack.Navigator>
+    </NavigationContainer>
   );
 }
 
