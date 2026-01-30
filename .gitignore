@@ -1,43 +1,75 @@
-__pycache__/
+# -----------------------------
+# General
+# -----------------------------
+.DS_Store
+Thumbs.db
 
-# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+# Logs / dumps / reports
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.7z
 
-# dependencies
-node_modules/
+# If you want to keep specific zips in docs, remove *.zip and add:
+# docs/bugs/*.zip
 
-# Expo
-.expo/
-dist/
-web-build/
+# -----------------------------
+# Node / React Native / Expo
+# -----------------------------
+**/node_modules/
+**/.expo/
+**/.expo-shared/
+**/.cache/
+**/dist/
+**/build/
+**/web-build/
 expo-env.d.ts
 
-# Native
-.kotlin/
-*.orig.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-
-# Metro
+# Metro / React Native
 .metro-health-check*
-
-# debug
 npm-debug.*
 yarn-debug.*
 yarn-error.*
 
-# macOS
-.DS_Store
-*.pem
+# Generated native folders (if you ever prebuild)
+**/ios/
+**/android/
 
-# local env files
-.env*.local
+# -----------------------------
+# Environment files (important)
+# -----------------------------
+**/.env
+**/.env.*
+!**/.env.example
 
-# typescript
-*.tsbuildinfo
+# -----------------------------
+# Python (Jetson + ServerPC)
+# -----------------------------
+**/__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
 
-# generated native folders
-/ios
-/android
+# Virtual environments
+**/.venv/
+**/venv/
+**/env/
+
+# Python build artifacts
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# -----------------------------
+# OS / IDE
+# -----------------------------
+.vscode/
+.idea/
+*.iml
