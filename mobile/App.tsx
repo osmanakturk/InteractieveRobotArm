@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import SplashScreen from './src/screens/SplashScreen';
+import ConnectionHubScreen from './src/screens/ConnectionHubScreen';
 import RobotConnectionScreen from './src/screens/RobotConnectionScreen';
 import SystemConnectionScreen from './src/screens/SystemConnectionScreen';
 import ModeSelectionScreen from './src/screens/ModeSelectionScreen';
@@ -21,6 +22,7 @@ export default function App() {
     <NavigationContainer>
       <Stack.Navigator initialRouteName="Splash" screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Splash" component={SplashScreen} />
+        <Stack.Screen name="ConnectionHub" component={ConnectionHubScreen} />
         <Stack.Screen name="SystemConnect" component={SystemConnectionScreen} />
         <Stack.Screen name="RobotConnect" component={RobotConnectionScreen} />
         <Stack.Screen name="ServerPCConnect" component={ServerPCConnectionScreen} />

@@ -1,39 +1,54 @@
-import { StyleSheet, Text, View, Image } from 'react-native'
-import React, { use, useEffect } from 'react'
+import React, { useEffect, useRef } from "react";
+import { Image, StyleSheet, View } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
+export const STORAGE_KEYS = {
+  gateway: "@conn/gateway",
+  robot: "@conn/robot",
+  aiserver: "@conn/aiserver",
+} as const;
 
+export default function SplashScreen({ navigation }: any) {
+  const navigatedRef = useRef(false);
 
-const SplashScreen = ({navigation}:any) => {
-    useEffect(() => {
-      const t = setTimeout(()=>{
-        navigation.replace('SystemConnect');
-      }, 1500);
-    
-      return () => clearTimeout(t);
-    }, [navigation])
-    
+  useEffect(() => {
+    let alive = true;
+
+    const boot = async () => {
+      try {
+        await AsyncStorage.multiRemove([
+          STORAGE_KEYS.gateway,
+          STORAGE_KEYS.robot,
+          STORAGE_KEYS.aiserver,
+        ]);
+      } catch {
+        // sessiz
+      }
+
+      await new Promise((r) => setTimeout(r, 1200));
+
+      if (!alive) return;
+      if (navigatedRef.current) return;
+      navigatedRef.current = true;
+
+      navigation.replace("ModeSelect", { selected: "gateway" });
+    };
+
+    boot();
+
+    return () => {
+      alive = false;
+    };
+  }, [navigation]);
+
   return (
     <View style={styles.container}>
-      <Image style={styles.image}
-        source={require("../../assets/splash.jpg")}
-        />
+      <Image source={require("../../assets/splash.jpg")} style={styles.image} resizeMode="cover" />
     </View>
-  )
+  );
 }
 
-export default SplashScreen
-
 const styles = StyleSheet.create({
-    container:{
-        flex:1,
-        justifyContent:'center',
-        alignItems:'center',
-    
-    },
-    image:{
-        flex:1,
-        justifyContent:'center',
-        width: '100%'
-    
-    }
-})
+  container: { flex: 1, backgroundColor: "black" },
+  image: { flex: 1, width: "100%" },
+});
