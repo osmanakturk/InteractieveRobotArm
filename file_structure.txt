@@ -1,0 +1,93 @@
+InteractieveRobotArm/
+├─ README.md
+├─ LICENSE
+├─ .gitignore
+├─ .editorconfig                  # (opsiyonel ama önerilir)
+├─ docs/
+│  ├─ architecture.md            # sistem şeması + akışlar
+│  ├─ network.md                 # IP planı + portlar
+│  ├─ api_jetson.md              # Jetson API endpoint listesi
+│  ├─ api_serverpc.md            # ServerPC API endpoint listesi
+│  ├─ setup_jetson.md            # Jetson kurulum adımları
+│  ├─ setup_serverpc.md          # Server PC kurulum adımları
+│  ├─ setup_mobile.md            # Expo Go kurulum & run
+│  └─ sprint/
+│     ├─ sprint_1.md
+│     ├─ sprint_2.md
+│     └─ sprint_3.md
+│
+├─ mobile/                        # Expo React Native (kullanıcı app)
+│  ├─ app.json
+│  ├─ package.json
+│  ├─ package-lock.json
+│  ├─ tsconfig.json
+│  ├─ App.tsx
+│  ├─ index.ts
+│  ├─ assets/
+│  ├─ src/
+│  │  ├─ screens/
+│  │  ├─ navigation/
+│  │  ├─ components/
+│  │  ├─ services/               # Jetson API client (fetch)
+│  │  ├─ state/                  # (opsiyonel) Zustand/Context
+│  │  └─ utils/
+│  └─ test/
+│
+├─ jetson/                        # Jetson Orin Nano backend
+│  ├─ README.md
+│  ├─ requirements.txt            # veya pyproject.toml
+│  ├─ .env.example                # IP/port config örneği
+│  ├─ src/
+│  │  ├─ main.py                  # FastAPI/Flask entrypoint
+│  │  ├─ config.py
+│  │  ├─ api/
+│  │  │  ├─ routes_system.py       # health, status, config
+│  │  │  ├─ routes_robot.py        # connect/enable/jog/gripper
+│  │  │  ├─ routes_camera.py       # stream, frames, depth
+│  │  │  ├─ routes_modes.py        # manual/pickplace/voice triggers
+│  │  │  └─ routes_ai_bridge.py    # ServerPC çağrıları
+│  │  ├─ robot/
+│  │  │  ├─ xarm_controller.py
+│  │  │  └─ safety.py
+│  │  ├─ camera/
+│  │  │  ├─ realsense_stream.py
+│  │  │  └─ depth_utils.py
+│  │  ├─ vision/
+│  │  │  ├─ yolo_infer.py
+│  │  │  └─ postprocess.py
+│  │  ├─ voice/
+│  │  │  ├─ whisper_service.py
+│  │  │  └─ commands.py
+│  │  └─ clients/
+│  │     └─ serverpc_client.py     # ServerPC API wrapper
+│  ├─ scripts/
+│  │  ├─ run_dev.sh
+│  │  └─ run_prod.sh
+│  └─ tests/
+│
+├─ serverpc/                      # PC’de VLA/VLM inference servisi
+│  ├─ README.md
+│  ├─ requirements.txt            # veya pyproject.toml
+│  ├─ .env.example
+│  ├─ src/
+│  │  ├─ main.py                  # FastAPI önerilir
+│  │  ├─ config.py
+│  │  ├─ api/
+│  │  │  ├─ routes_vlm.py         # görüntü+prompt -> cevap
+│  │  │  ├─ routes_vla.py         # hedef -> plan / action önerisi
+│  │  │  └─ routes_health.py
+│  │  ├─ models/
+│  │  │  ├─ vlm_loader.py
+│  │  │  ├─ vla_loader.py
+│  │  │  └─ utils.py
+│  │  └─ pipelines/
+│  │     ├─ pickplace_pipeline.py
+│  │     └─ voice_pipeline.py
+│  ├─ scripts/
+│  │  ├─ run_dev.sh
+│  │  └─ run_prod.sh
+│  └─ tests/
+│
+└─ prototype/                     # eski web prototip / arşiv
+   ├─ README.md
+   └─ (mevcut _prototype_webui içeriği buraya)
