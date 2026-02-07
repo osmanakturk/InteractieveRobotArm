@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>xArm WebGUI (Gateway Master)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+
+  <body>
+    <div class="app">
+      <!-- TOP BAR: Connections -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <div class="brand">
+            <div class="brand-badge">X</div>
+            <div class="brand-text">
+              <div class="brand-title">xArm Controller</div>
+              <div class="brand-sub">Web GUI • Gateway Master</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="topbar-connections">
+          <!-- Gateway -->
+          <div class="conn-card">
+            <div class="conn-head">
+              <span class="dot dot-gray" id="dot-gateway"></span>
+              <span class="conn-title">Gateway</span>
+              <span class="conn-meta" id="meta-gateway">Idle</span>
+            </div>
+            <div class="conn-body">
+              <input
+                id="in-gateway"
+                class="input mono"
+                placeholder="http://192.168.1.20:8000"
+                spellcheck="false"
+              />
+              <button class="btn primary" id="btn-gateway-connect">Connect</button>
+            </div>
+          </div>
+
+          <!-- Robot -->
+          <div class="conn-card">
+            <div class="conn-head">
+              <span class="dot dot-gray" id="dot-robot"></span>
+              <span class="conn-title">Robot (xArm)</span>
+              <span class="conn-meta" id="meta-robot">Idle</span>
+            </div>
+            <div class="conn-body">
+              <input
+                id="in-robot"
+                class="input mono"
+                placeholder="192.168.1.201"
+                spellcheck="false"
+              />
+              <button class="btn" id="btn-robot-connect">Set</button>
+            </div>
+          </div>
+
+          <!-- AI Server -->
+          <div class="conn-card">
+            <div class="conn-head">
+              <span class="dot dot-gray" id="dot-aiserver"></span>
+              <span class="conn-title">AI Server</span>
+              <span class="conn-meta" id="meta-aiserver">Idle</span>
+            </div>
+            <div class="conn-body">
+              <input
+                id="in-aiserver"
+                class="input mono"
+                placeholder="http://192.168.1.50:9000"
+                spellcheck="false"
+              />
+              <button class="btn" id="btn-aiserver-set">Set</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <div class="mini">
+            <div class="mini-title">Telemetry</div>
+            <div class="mini-row">
+              <span class="pill" id="pill-enabled">Enabled: ?</span>
+              <span class="pill" id="pill-state">State: ?</span>
+              <span class="pill" id="pill-error">Err: ?</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- MAIN GRID -->
+      <main class="main">
+        <!-- LEFT CONTROLS -->
+        <section class="panel">
+          <div class="panel-title">Robot Control</div>
+
+          <div class="row gap">
+            <button class="btn success" id="btn-enable">Enable</button>
+            <button class="btn warn" id="btn-disable">Disable</button>
+            <button class="btn danger" id="btn-stop">STOP</button>
+          </div>
+
+          <div class="row gap">
+            <button class="btn" id="btn-home">Home</button>
+            <button class="btn" id="btn-status">Refresh Status</button>
+          </div>
+
+          <div class="hr"></div>
+
+          <div class="form-grid">
+            <label class="lbl">Jog Frame</label>
+            <select id="sel-frame" class="input">
+              <option value="base">Jog Frame: Base</option>
+              <option value="tool">Jog Frame: Tool</option>
+            </select>
+
+            <label class="lbl">Control Mode</label>
+            <select id="sel-mode" class="input">
+              <option value="xyz">Control Mode: XYZ</option>
+              <option value="rxyz">Control Mode: RXYZ</option>
+            </select>
+          </div>
+
+          <div class="hr"></div>
+
+          <div class="speed">
+            <div class="speed-top">
+              <div class="speed-label">Speed</div>
+              <div class="speed-val"><span id="speed-pct">50</span>%</div>
+            </div>
+            <div class="speed-row">
+              <button class="btn small" id="btn-speed-down">−</button>
+              <div class="bar">
+                <div class="bar-fill" id="speed-fill" style="width:50%"></div>
+              </div>
+              <button class="btn small" id="btn-speed-up">+</button>
+            </div>
+          </div>
+
+          <div class="hint">
+            Hold-to-jog uses repeated <span class="mono">/api/jog</span> calls.
+          </div>
+        </section>
+
+        <!-- CENTER CAMERA -->
+        <section class="camera">
+          <div class="camera-wrap">
+            <img id="img-camera" alt="RealSense Stream" />
+            <div class="camera-overlay" id="camera-overlay">
+              <div class="camera-overlay-title">Camera not started</div>
+              <div class="camera-overlay-sub">Connect Gateway to start /api/camera/realsense</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- RIGHT CONTROLS -->
+        <section class="panel">
+          <div class="panel-title">Jog & Gripper</div>
+
+          <div class="pad">
+            <div class="pad-row">
+              <button class="btn hold" data-jog="up" id="btn-up">▲</button>
+            </div>
+            <div class="pad-row pad-mid">
+              <button class="btn hold" data-jog="left" id="btn-left">◀</button>
+              <div class="pad-center">
+                <div class="pad-center-title" id="pad-center-title">XYZ</div>
+                <div class="pad-center-sub" id="pad-center-sub">Base</div>
+              </div>
+              <button class="btn hold" data-jog="right" id="btn-right">▶</button>
+            </div>
+            <div class="pad-row">
+              <button class="btn hold" data-jog="down" id="btn-down">▼</button>
+            </div>
+          </div>
+
+          <div class="hr"></div>
+
+          <!-- Z + Gripper cross (senin istediğin şekil) -->
+          <div class="gripbar">
+            <div class="gripbar-top">
+              <div class="gripbar-label">Gripper</div>
+              <div class="gripbar-val"><span id="grip-pct">0</span>%</div>
+            </div>
+            <div class="bar">
+              <div class="bar-fill" id="grip-fill" style="width:0%"></div>
+            </div>
+          </div>
+
+          <div class="cross">
+            <button class="btn hold" data-jog="zplus">Z+</button>
+            <div class="cross-mid">
+              <button class="btn" id="btn-grip-close">Grip-</button>
+              <div class="cross-center mono" id="cross-center">Base</div>
+              <button class="btn" id="btn-grip-open">Grip+</button>
+            </div>
+            <button class="btn hold" data-jog="zminus">Z-</button>
+          </div>
+
+          <div class="hint">
+            Camera: <span class="mono">/api/camera/realsense</span>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        UFACTORY xArm • WebGUI • Gateway Master
+      </footer>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
