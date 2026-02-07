@@ -1,3 +1,4 @@
+# config.py
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
@@ -20,13 +21,13 @@ class AppConfig:
     # Streaming (MJPEG)
     mjpeg_quality: int = 80
 
-    # YOLO model (Object Detection)
-    # Örnekler:
-    #   "yolov8n.pt" (CPU/GPU)
-    #   "models/yolo11n.engine" (TensorRT engine)
+    # YOLO model (segmentation)
     yolo_model_path: str = "models/yolo26n-seg.engine"
 
-    # Depth label sampling
-    depth_kernel: int = 5  # 5x5 average at bbox center
+    # Depth label sampling (bbox center 5x5 average)
+    depth_kernel: int = 5  # must be odd
+
+    # Optional: overlay alpha
+    overlay_alpha: float = 0.4  # mask fill alpha
 
 CONFIG = AppConfig()
