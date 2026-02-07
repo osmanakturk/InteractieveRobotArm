@@ -7,7 +7,7 @@ import random
 # --- 1. AYARLAR ---
 # DİKKAT: Segmentasyon için '-seg' uzantılı modeli kullanıyoruz.
 # İlk çalıştırmada otomatik indirilecektir.
-model = YOLO('./test/yolo26n-seg.pt')
+model = YOLO('models/yolo26n-seg.engine')
 
 pipeline = rs.pipeline()
 config = rs.config()
