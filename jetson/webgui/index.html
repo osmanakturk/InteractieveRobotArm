@@ -9,7 +9,23 @@
 
   <body>
     <div class="app">
-      <!-- TOP BAR: Connections -->
+      <!-- TOAST -->
+      <div id="toast" class="toast"></div>
+
+      <!-- SAFETY MODAL -->
+      <div id="modal" class="modal">
+        <div class="modal-card">
+          <div class="modal-title">Safety Event</div>
+          <div id="modal-text" class="modal-text"></div>
+          <div class="modal-row">
+            <button class="btn" id="btn-modal-close">Close</button>
+            <button class="btn warn" id="btn-modal-clear">Clear Safety</button>
+            <button class="btn success" id="btn-modal-enable">Enable</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- TOP BAR -->
       <header class="topbar">
         <div class="topbar-left">
           <div class="brand">
@@ -27,16 +43,12 @@
             <div class="conn-head">
               <span class="dot dot-gray" id="dot-gateway"></span>
               <span class="conn-title">Gateway</span>
-              <span class="conn-meta" id="meta-gateway">Idle</span>
+              <span class="conn-meta" id="meta-gateway">Disconnected</span>
             </div>
             <div class="conn-body">
-              <input
-                id="in-gateway"
-                class="input mono"
-                placeholder="http://192.168.1.20:8000"
-                spellcheck="false"
-              />
+              <input id="in-gateway" class="input mono" placeholder="http://192.168.1.20:8000" spellcheck="false" />
               <button class="btn primary" id="btn-gateway-connect">Connect</button>
+              <button class="btn" id="btn-gateway-disconnect">Disconnect</button>
             </div>
           </div>
 
@@ -45,16 +57,12 @@
             <div class="conn-head">
               <span class="dot dot-gray" id="dot-robot"></span>
               <span class="conn-title">Robot (xArm)</span>
-              <span class="conn-meta" id="meta-robot">Idle</span>
+              <span class="conn-meta" id="meta-robot">Disconnected</span>
             </div>
             <div class="conn-body">
-              <input
-                id="in-robot"
-                class="input mono"
-                placeholder="192.168.1.201"
-                spellcheck="false"
-              />
-              <button class="btn" id="btn-robot-connect">Set</button>
+              <input id="in-robot" class="input mono" placeholder="192.168.1.201" spellcheck="false" />
+              <button class="btn" id="btn-robot-connect">Connect</button>
+              <button class="btn" id="btn-robot-disconnect">Disconnect</button>
             </div>
           </div>
 
@@ -63,16 +71,12 @@
             <div class="conn-head">
               <span class="dot dot-gray" id="dot-aiserver"></span>
               <span class="conn-title">AI Server</span>
-              <span class="conn-meta" id="meta-aiserver">Idle</span>
+              <span class="conn-meta" id="meta-aiserver">Disconnected</span>
             </div>
             <div class="conn-body">
-              <input
-                id="in-aiserver"
-                class="input mono"
-                placeholder="http://192.168.1.50:9000"
-                spellcheck="false"
-              />
-              <button class="btn" id="btn-aiserver-set">Set</button>
+              <input id="in-aiserver" class="input mono" placeholder="http://192.168.1.50:9000" spellcheck="false" />
+              <button class="btn" id="btn-aiserver-connect">Set</button>
+              <button class="btn" id="btn-aiserver-disconnect">Clear</button>
             </div>
           </div>
         </div>
@@ -84,6 +88,8 @@
               <span class="pill" id="pill-enabled">Enabled: ?</span>
               <span class="pill" id="pill-state">State: ?</span>
               <span class="pill" id="pill-error">Err: ?</span>
+              <span class="pill" id="pill-safety">Safety: ?</span>
+              <span class="pill" id="pill-camera">Camera: ?</span>
             </div>
           </div>
         </div>
@@ -91,19 +97,20 @@
 
       <!-- MAIN GRID -->
       <main class="main">
-        <!-- LEFT CONTROLS -->
+        <!-- LEFT -->
         <section class="panel">
           <div class="panel-title">Robot Control</div>
 
-          <div class="row gap">
+          <div class="row gap wrap">
             <button class="btn success" id="btn-enable">Enable</button>
             <button class="btn warn" id="btn-disable">Disable</button>
             <button class="btn danger" id="btn-stop">STOP</button>
           </div>
 
-          <div class="row gap">
+          <div class="row gap wrap">
             <button class="btn" id="btn-home">Home</button>
             <button class="btn" id="btn-status">Refresh Status</button>
+            <button class="btn" id="btn-safety-clear">Clear Safety</button>
           </div>
 
           <div class="hr"></div>
@@ -138,9 +145,15 @@
             </div>
           </div>
 
-          <div class="hint">
-            Hold-to-jog uses repeated <span class="mono">/api/jog</span> calls.
+          <div class="hr"></div>
+
+          <div class="row gap wrap">
+            <button class="btn" id="btn-camera-start">Start Camera</button>
+            <button class="btn" id="btn-camera-stop">Stop Camera</button>
+            <button class="btn" id="btn-camera-status">Camera Status</button>
           </div>
+
+      
         </section>
 
         <!-- CENTER CAMERA -->
@@ -148,13 +161,13 @@
           <div class="camera-wrap">
             <img id="img-camera" alt="RealSense Stream" />
             <div class="camera-overlay" id="camera-overlay">
-              <div class="camera-overlay-title">Camera not started</div>
-              <div class="camera-overlay-sub">Connect Gateway to start /api/camera/realsense</div>
+              <div class="camera-overlay-title" id="camera-overlay-title">Camera not started</div>
+              <div class="camera-overlay-sub" id="camera-overlay-sub">Connect Gateway → Start Camera</div>
             </div>
           </div>
         </section>
 
-        <!-- RIGHT CONTROLS -->
+        <!-- RIGHT -->
         <section class="panel">
           <div class="panel-title">Jog & Gripper</div>
 
@@ -177,7 +190,6 @@
 
           <div class="hr"></div>
 
-          <!-- Z + Gripper cross (senin istediğin şekil) -->
           <div class="gripbar">
             <div class="gripbar-top">
               <div class="gripbar-label">Gripper</div>
@@ -198,9 +210,7 @@
             <button class="btn hold" data-jog="zminus">Z-</button>
           </div>
 
-          <div class="hint">
-            Camera: <span class="mono">/api/camera/realsense</span>
-          </div>
+
         </section>
       </main>
 
