@@ -1,4 +1,4 @@
-# realsense_streamer.py
+# jetson/realsense_streamer.py
 from __future__ import annotations
 
 import time
@@ -38,7 +38,14 @@ class RealSenseDetectorStreamer:
         self._colors = None  # np array (80,3)
 
         self._running = False
+        self._enabled = bool(getattr(CONFIG, "camera_autostart", False))
         self._last_err: str = ""
+
+        if self._enabled:
+            try:
+                self.open()
+            except Exception:
+                pass
 
     def last_error(self) -> str:
         with self._lock:
@@ -47,6 +54,20 @@ class RealSenseDetectorStreamer:
     def _set_err(self, msg: str) -> None:
         with self._lock:
             self._last_err = msg
+
+    def is_started(self) -> bool:
+        with self._lock:
+            return self._enabled and self._running
+
+    def start(self) -> bool:
+        with self._lock:
+            self._enabled = True
+        return self.open()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._enabled = False
+        self.close()
 
     def open(self) -> bool:
         with self._lock:
@@ -61,16 +82,13 @@ class RealSenseDetectorStreamer:
                 return False
 
             try:
-                # YOLO load once
                 if self._model is None:
                     self._model = YOLO(CONFIG.yolo_model_path)
 
-                # stable random colors for coco(80)
                 if self._colors is None:
                     rng = np.random.default_rng(42)
                     self._colors = rng.integers(0, 255, size=(80, 3), dtype=np.uint8)
 
-                # pipeline start
                 pipeline = rs.pipeline()
                 cfg = rs.config()
                 cfg.enable_stream(rs.stream.depth, CONFIG.rs_width, CONFIG.rs_height, rs.format.z16, CONFIG.rs_fps)
@@ -112,12 +130,17 @@ class RealSenseDetectorStreamer:
         return jpg.tobytes() if ok else b""
 
     def frames(self) -> Generator[bytes, None, None]:
-        """
-        Yields MJPEG multipart chunks:
-        --frame\r\nContent-Type: image/jpeg\r\n\r\n<JPEG>\r\n
-        """
+        # If not enabled, keep yielding a static info frame
+        with self._lock:
+            enabled = self._enabled
+
+        if not enabled:
+            jpg = self._make_error_frame("RealSense stream is stopped. Press Start.")
+            while True:
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+                time.sleep(0.2)
+
         if not self.open():
-            # yield an error frame repeatedly so the browser doesn't hang
             err = self.last_error() or "RealSense/YOLO not available"
             jpg = self._make_error_frame(err)
             while True:
@@ -151,29 +174,23 @@ class RealSenseDetectorStreamer:
                 rows, cols, _ = color_image.shape
                 overlay = color_image.copy()
 
-                # YOLO segmentation inference
                 results = self._model(color_image, stream=True, verbose=False, retina_masks=True)
 
                 for r in results:
                     if r.masks is None:
                         continue
 
-                    # r.masks.xy: list of polygons
                     for box, mask_poly in zip(r.boxes, r.masks.xy):
                         cls_id = int(box.cls[0]) if box.cls is not None else 0
                         cls_id = max(0, min(79, cls_id))
                         color = tuple(int(c) for c in self._colors[cls_id].tolist())
                         class_name = self._model.names.get(cls_id, str(cls_id))
 
-                        # polygon -> contour
                         contour = mask_poly.astype(np.int32).reshape(-1, 1, 2)
 
-                        # fill overlay
                         cv2.fillPoly(overlay, [contour], color)
-                        # draw contour
                         cv2.drawContours(color_image, [contour], -1, color, 2)
 
-                        # bbox center
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
                         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
@@ -192,16 +209,13 @@ class RealSenseDetectorStreamer:
                         else:
                             dist_text = "?.??m"
 
-                        # small ROI rectangle
                         cv2.rectangle(color_image, (min_x, min_y), (max_x, max_y), (255, 255, 255), 1)
 
                         label = f"{class_name} {dist_text}"
                         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                        # black background box
                         cv2.rectangle(color_image, (cx - 5, cy - th - 8), (cx + tw + 8, cy + 6), (0, 0, 0), -1)
                         cv2.putText(color_image, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-                # overlay blend
                 alpha = float(CONFIG.overlay_alpha)
                 alpha = max(0.0, min(1.0, alpha))
                 cv2.addWeighted(overlay, alpha, color_image, 1.0 - alpha, 0.0, color_image)
@@ -214,11 +228,8 @@ class RealSenseDetectorStreamer:
                 time.sleep(1.0 / max(1, CONFIG.rs_fps))
 
         except GeneratorExit:
-            # client closed connection
             pass
         except Exception as e:
             self._set_err(f"stream error: {e}")
         finally:
-            # do not always stop pipeline if multiple clients are expected.
-            # If you want strict: self.close()
             pass
