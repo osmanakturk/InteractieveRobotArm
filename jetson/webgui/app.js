@@ -4,23 +4,26 @@ const $ = (id) => document.getElementById(id);
 const state = {
   gateway: "",
   frame: "base",
-  mode: "xyz", // xyz | rxyz
+  mode: "xyz",
   speedPct: 50,
 
   robotConnected: false,
   robotEnabled: false,
   safetyHit: false,
 
-  polling: null,
-
   holdTimer: null,
   holdDir: null,
 
   cameraStarted: false,
+
+  // WS
+  ws: null,
+  wsConnected: false,
+  wsReconnectTimer: null,
+  wsReconnectAttempts: 0,
 };
 
-const HOLD_INTERVAL_MS = 120; // client-side
-// server-side: CONFIG.jog_min_interval_ms (örn 100ms)
+const HOLD_INTERVAL_MS = 120;
 
 function toast(msg, ms = 2500) {
   const t = $("toast");
@@ -39,7 +42,8 @@ function setDot(dotEl, status) {
   else dotEl.classList.add("dot-gray");
 }
 
-function normalizeGateway(input) {
+// FINAL: one normalizer for all http inputs (Gateway + AI)
+function normalizeAnyHttp(input) {
   const raw = (input || "").trim();
   if (!raw) return "";
   if (/^https?:\/\//i.test(raw)) return raw;
@@ -68,7 +72,6 @@ function requireGatewaySync() {
   }
   return true;
 }
-
 function requireRobotConnectedSync() {
   if (!state.robotConnected) {
     toast("Robot not connected. Connect robot IP first.");
@@ -76,17 +79,8 @@ function requireRobotConnectedSync() {
   }
   return true;
 }
-
-// IMPORTANT: enabled guard now can refresh once (race-condition fix)
 async function ensureRobotEnabledFresh() {
   if (!requireGatewaySync()) return false;
-
-  if (state.robotEnabled) return true;
-
-  try {
-    await refreshStatus();
-  } catch {}
-
   if (!state.robotConnected) {
     toast("Robot not connected. Connect robot IP first.");
     return false;
@@ -121,11 +115,17 @@ async function apiPost(path, body = {}) {
   return data;
 }
 
+// fallback (WS düşerse)
+async function refreshOnce() {
+  if (!state.gateway) return;
+  const data = await apiGet("/api/status");
+  applyStatus(data);
+}
+
 // ---------- Modal (Safety) ----------
 function showSafetyModal(message) {
   $("modal-text").textContent =
-    message ||
-    "Safety limit reached. Robot was disabled for safety. Press Enable again to continue.";
+    message || "Safety limit reached. Robot was disabled for safety. Press Enable again to continue.";
   $("modal").classList.add("show");
 }
 function hideSafetyModal() {
@@ -136,8 +136,7 @@ function hideSafetyModal() {
 function attachCameraStream() {
   const img = $("img-camera");
   if (!state.gateway) return;
-
-  img.src = `${state.gateway}/api/camera/realsense`;
+  img.src = `${state.gateway}/api/camera/realsense?ts=${Date.now()}`;
 
   img.onerror = () => {
     state.cameraStarted = false;
@@ -183,9 +182,8 @@ async function cameraStatus() {
     state.cameraStarted = started;
 
     $("pill-camera").textContent = `Camera: ${started ? "ON" : "OFF"}`;
-    if (!started) {
-      setCameraOverlay(true, "Camera not started", err || "Press Start Camera.");
-    } else {
+    if (!started) setCameraOverlay(true, "Camera not started", err || "Press Start Camera.");
+    else {
       setCameraOverlay(false);
       attachCameraStream();
     }
@@ -195,19 +193,16 @@ async function cameraStatus() {
   }
 }
 
-// ---------- Status polling ----------
-async function refreshStatus() {
-  if (!state.gateway) return;
-
-  const data = await apiGet("/api/status");
+// ---------- STATUS UI (WS payload -> UI) ----------
+function applyStatus(data) {
   const st = data.status || {};
   const safety = data.safety || {};
   const cam = data.camera || {};
-  const aiUrl = data.ai_server || null;
+  const ai = data.ai_server || {};
 
-  // Gateway OK
-  setDot($("dot-gateway"), "connected");
-  $("meta-gateway").textContent = "Connected";
+  // Gateway indicator: WS varsa connected
+  setDot($("dot-gateway"), state.wsConnected ? "connected" : (state.gateway ? "connecting" : "gray"));
+  $("meta-gateway").textContent = state.wsConnected ? "Connected" : (state.gateway ? "Connecting..." : "Disconnected");
 
   // Robot
   state.robotConnected = !!st.connected;
@@ -226,22 +221,26 @@ async function refreshStatus() {
   $("pill-safety").textContent = `Safety: ${limitHit ? "HIT" : "OK"}`;
 
   if (limitHit) {
-    if (!refreshStatus._safetyShown) {
-      refreshStatus._safetyShown = true;
+    if (!applyStatus._safetyShown) {
+      applyStatus._safetyShown = true;
       showSafetyModal(safety.message || "");
     }
   } else {
-    refreshStatus._safetyShown = false;
+    applyStatus._safetyShown = false;
   }
 
   // Camera
   const camStarted = !!(cam.started ?? false);
   $("pill-camera").textContent = `Camera: ${camStarted ? "ON" : "OFF"}`;
 
-  // AI server (URL)
-  const aiConnected = !!aiUrl;
-  setDot($("dot-aiserver"), aiConnected ? "connected" : "gray");
-  $("meta-aiserver").textContent = aiConnected ? "Set" : "Disconnected";
+  // AI
+  const aiConfigured = !!ai.configured;
+  const aiConnected = !!ai.connected;
+
+  setDot($("dot-aiserver"), aiConnected ? "connected" : (aiConfigured ? "error" : "gray"));
+  // daha bilgilendirici meta:
+  if (aiConnected) $("meta-aiserver").textContent = `OK (${ai.latency_ms ?? "?"}ms)`;
+  else $("meta-aiserver").textContent = aiConfigured ? "FAIL" : "Disconnected";
 
   // Gripper %
   if (typeof st.gripper_pct === "number") {
@@ -251,72 +250,122 @@ async function refreshStatus() {
   }
 }
 
-function startPolling() {
-  stopPolling();
-  refreshStatus().catch(() => {});
-  state.polling = setInterval(() => refreshStatus().catch(() => {}), 1000);
+// ---------- WEBSOCKET ----------
+function gatewayToWsUrl(gatewayHttpUrl) {
+  const u = new URL(gatewayHttpUrl);
+  const wsProto = u.protocol === "https:" ? "wss:" : "ws:";
+  return `${wsProto}//${u.host}/ws/status`;
 }
-function stopPolling() {
-  if (state.polling) clearInterval(state.polling);
-  state.polling = null;
+
+function wsClose() {
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
+  state.wsReconnectAttempts = 0;
+  state.wsConnected = false;
+
+  try {
+    if (state.ws) state.ws.close();
+  } catch {}
+  state.ws = null;
+}
+
+function wsConnect() {
+  if (!state.gateway) return;
+
+  wsClose(); // ensure clean
+  const wsUrl = gatewayToWsUrl(state.gateway);
+
+  setDot($("dot-gateway"), "connecting");
+  $("meta-gateway").textContent = "Connecting...";
+
+  const ws = new WebSocket(wsUrl);
+  state.ws = ws;
+
+  ws.onopen = () => {
+    state.wsConnected = true;
+    state.wsReconnectAttempts = 0;
+
+    setDot($("dot-gateway"), "connected");
+    $("meta-gateway").textContent = "Connected";
+    toast("Gateway connected (WebSocket).");
+
+    setCameraOverlay(true, "Camera not started", "Press Start Camera.");
+    $("img-camera").src = "";
+  };
+
+  ws.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data?.ok) applyStatus(data);
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    state.wsConnected = false;
+
+    // reconnect only if gateway still set
+    if (!state.gateway) {
+      setDot($("dot-gateway"), "gray");
+      $("meta-gateway").textContent = "Disconnected";
+      return;
+    }
+
+    setDot($("dot-gateway"), "connecting");
+    $("meta-gateway").textContent = "Reconnecting...";
+
+    const attempt = Math.min(10, state.wsReconnectAttempts + 1);
+    state.wsReconnectAttempts = attempt;
+
+    const backoffMs = Math.min(5000, 300 + attempt * 300);
+    state.wsReconnectTimer = setTimeout(() => wsConnect(), backoffMs);
+  };
 }
 
 // ---------- Gateway connect/disconnect ----------
 async function connectGateway() {
-  const gw = normalizeGateway($("in-gateway").value);
+  const gw = normalizeAnyHttp($("in-gateway").value);
   if (!gw) return;
 
   state.gateway = gw;
-  setDot($("dot-gateway"), "connecting");
-  $("meta-gateway").textContent = "Connecting...";
+  wsConnect();
 
+  // quick verify
   try {
     await apiGet("/api/status");
-    setDot($("dot-gateway"), "connected");
-    $("meta-gateway").textContent = "Connected";
-    toast("Gateway connected.");
-    startPolling();
-
-    setCameraOverlay(true, "Camera not started", "Press Start Camera.");
-    $("img-camera").src = "";
   } catch (e) {
-    setDot($("dot-gateway"), "error");
-    $("meta-gateway").textContent = "Error";
     toast(String(e.message || e));
   }
 }
 
-// IMPORTANT: backend'i de resetle!
 async function disconnectGateway() {
-  // önce polling durdur (interval daha fazla GET atmasın)
-  stopPolling();
-  stopHold();
+  // 0) remember old gateway for backend call
+  const oldGw = state.gateway;
 
-  // gateway set ise server-side reset dene
-  const gw = state.gateway;
-  if (gw) {
+  // 1) prevent reconnect loops immediately
+  state.gateway = "";
+  wsClose();
+
+  // 2) backend reset (robot/camera/ai temizlensin)
+  if (oldGw) {
     try {
-      // manual fetch: apiPost kullanma çünkü birazdan state.gateway boşalacak
-      const r = await fetch(`${gw}/api/gateway/disconnect`, {
+      await fetch(`${oldGw}/api/gateway/disconnect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      // hata olsa bile UI temizlenmeli
-      await r.json().catch(() => ({}));
-    } catch {
-      // gateway zaten düşmüş olabilir -> ignore
-    }
+    } catch {}
   }
 
-  // şimdi local state sıfırla
-  state.gateway = "";
+  // 3) local state reset
   state.robotConnected = false;
   state.robotEnabled = false;
 
+  stopHold();
+
   setDot($("dot-gateway"), "gray");
   $("meta-gateway").textContent = "Disconnected";
-
   setDot($("dot-robot"), "gray");
   $("meta-robot").textContent = "Disconnected";
   setDot($("dot-aiserver"), "gray");
@@ -330,7 +379,7 @@ async function disconnectGateway() {
 
   $("img-camera").src = "";
   setCameraOverlay(true, "Gateway disconnected", "Connect Gateway to use camera and controls.");
-  toast("Gateway disconnected (server reset).");
+  toast("Gateway disconnected.");
 }
 
 // ---------- Robot connect/disconnect ----------
@@ -345,7 +394,7 @@ async function robotConnect() {
   try {
     await apiPost("/api/connect", { ip });
     toast("Robot connected.");
-    await refreshStatus();
+    await refreshOnce();
   } catch (e) {
     setDot($("dot-robot"), "error");
     $("meta-robot").textContent = "Error";
@@ -358,38 +407,41 @@ async function robotDisconnect() {
   try {
     await apiPost("/api/disconnect", {});
     toast("Robot disconnected.");
-    await refreshStatus();
+    await refreshOnce();
   } catch (e) {
     toast(String(e.message || e));
   }
 }
 
-// ---------- AI server set/clear ----------
-async function aiSet() {
+// ---------- AI connect/disconnect ----------
+async function aiConnect() {
   if (!requireGatewaySync()) return;
-  const url = ($("in-aiserver").value || "").trim();
+
+  // user can type: "192.168.1.50:9000" OR "http://..." OR "https://..."
+  const url = normalizeAnyHttp($("in-aiserver").value);
   if (!url) return;
 
   setDot($("dot-aiserver"), "connecting");
-  $("meta-aiserver").textContent = "Setting...";
+  $("meta-aiserver").textContent = "Connecting...";
 
   try {
-    await apiPost("/api/ai_server", { url });
-    toast("AI server set.");
-    await refreshStatus();
+    await apiPost("/api/ai_server/connect", { url });
+    toast("AI server connected.");
+    await refreshOnce();
   } catch (e) {
     setDot($("dot-aiserver"), "error");
     $("meta-aiserver").textContent = "Error";
     toast(String(e.message || e));
+    await refreshOnce().catch(() => {});
   }
 }
 
-async function aiClear() {
+async function aiDisconnect() {
   if (!requireGatewaySync()) return;
   try {
-    await apiPost("/api/ai_server/clear", {});
-    toast("AI server cleared.");
-    await refreshStatus();
+    await apiPost("/api/ai_server/disconnect", {});
+    toast("AI server disconnected.");
+    await refreshOnce();
   } catch (e) {
     toast(String(e.message || e));
   }
@@ -403,7 +455,7 @@ async function enableRobot() {
   try {
     await apiPost("/api/enable", {});
     toast("Robot enabled.");
-    await refreshStatus();
+    await refreshOnce();
   } catch (e) {
     toast(String(e.message || e));
   }
@@ -416,7 +468,7 @@ async function disableRobot() {
   try {
     await apiPost("/api/disable", {});
     toast("Robot disabled.");
-    await refreshStatus();
+    await refreshOnce();
   } catch (e) {
     toast(String(e.message || e));
   }
@@ -429,7 +481,7 @@ async function stopRobot() {
   try {
     await apiPost("/api/stop", {});
     toast("STOP pressed. Robot stopped.");
-    await refreshStatus();
+    await refreshOnce();
   } catch (e) {
     toast(String(e.message || e));
   }
@@ -448,22 +500,12 @@ async function homeRobot() {
   }
 }
 
-async function refreshBtn() {
-  if (!requireGatewaySync()) return;
-  try {
-    await refreshStatus();
-    toast("Status refreshed.");
-  } catch (e) {
-    toast(String(e.message || e));
-  }
-}
-
 async function clearSafety() {
   if (!requireGatewaySync()) return;
   try {
     await apiPost("/api/safety/clear", {});
     toast("Safety cleared.");
-    await refreshStatus();
+    await refreshOnce();
   } catch (e) {
     toast(String(e.message || e));
   }
@@ -506,8 +548,8 @@ async function setSpeed(pct) {
 
 // ---------- Jog mapping ----------
 function buildJogPayload(dir) {
-  const s = 5; // mm step
-  const r = 2; // deg step
+  const s = 5;
+  const r = 2;
 
   if (state.mode === "xyz") {
     if (dir === "up") return { dx: +s, dy: 0, dz: 0, droll: 0, dpitch: 0, dyaw: 0 };
@@ -537,7 +579,7 @@ async function jogOnce(dir) {
   } catch (e) {
     const msg = String(e.message || e);
     if (!msg.includes("429")) {
-      // toast(msg);
+      // optional toast
     }
   }
 }
@@ -568,6 +610,11 @@ async function gripper(action) {
   }
 }
 
+window.addEventListener("blur", () => stopHold());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopHold();
+});
+
 // ---------- Wire up ----------
 window.addEventListener("DOMContentLoaded", () => {
   setSpeedUI(50);
@@ -583,15 +630,14 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-robot-disconnect").addEventListener("click", robotDisconnect);
 
   // ai
-  $("btn-aiserver-connect").addEventListener("click", aiSet);
-  $("btn-aiserver-disconnect").addEventListener("click", aiClear);
+  $("btn-aiserver-connect").addEventListener("click", aiConnect);
+  $("btn-aiserver-disconnect").addEventListener("click", aiDisconnect);
 
   // robot controls
   $("btn-enable").addEventListener("click", enableRobot);
   $("btn-disable").addEventListener("click", disableRobot);
   $("btn-stop").addEventListener("click", stopRobot);
   $("btn-home").addEventListener("click", homeRobot);
-  $("btn-status").addEventListener("click", refreshBtn);
   $("btn-safety-clear").addEventListener("click", clearSafety);
 
   // frame/mode
@@ -614,8 +660,14 @@ window.addEventListener("DOMContentLoaded", () => {
   // hold buttons
   document.querySelectorAll(".btn.hold").forEach((el) => {
     const dir = el.getAttribute("data-jog");
-    const onDown = (ev) => { ev.preventDefault?.(); startHold(dir); };
-    const onUp = (ev) => { ev.preventDefault?.(); stopHold(); };
+    const onDown = (ev) => {
+      ev.preventDefault?.();
+      startHold(dir);
+    };
+    const onUp = (ev) => {
+      ev.preventDefault?.();
+      stopHold();
+    };
 
     el.addEventListener("mousedown", onDown);
     window.addEventListener("mouseup", onUp);
