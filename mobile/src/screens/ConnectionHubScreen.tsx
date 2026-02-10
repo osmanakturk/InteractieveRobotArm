@@ -11,94 +11,32 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
-type ConnKey = "gateway" | "robot" | "aiserver";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import { useFocusEffect } from "@react-navigation/native";
 
-export const STORAGE_KEYS = {
-  gateway: "@conn/gateway",
-  robot: "@conn/robot",
-  aiserver: "@conn/aiserver",
-} as const;
-
-type ConnState = {
-  value: string;
-  status: "idle" | "connecting" | "connected" | "error";
-  message?: string;
-  lastOkAt?: number;
-};
+import { useConnection, ConnKey } from "../connection/ConnectionContext";
 
 type RouteParams = {
   selected?: ConnKey;
   nextRoute?: "Manual" | "PickPlace" | "Voice";
-  returnTo?: "ModeSelect" | "None"; 
+  returnTo?: "ModeSelect" | "None";
   gateway?: string;
   robot?: string;
   aiserver?: string;
 };
-
-function normalizeBaseUrl(input: string) {
-  const raw = (input || "").trim();
-  if (!raw) return "";
-  if (!/^https?:\/\//i.test(raw)) return `http://${raw}`;
-  return raw;
-}
 
 export default function ConnectionHubScreen({ navigation, route }: any) {
   const params: RouteParams = route?.params || {};
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
+  const { gateway, robot, aiserver, setValue, connect, disconnect } = useConnection();
+
   const [selected, setSelected] = useState<ConnKey>(params.selected || "gateway");
 
-  const [gateway, setGateway] = useState<ConnState>({ value: params.gateway || "", status: "idle" });
-  const [robot, setRobot] = useState<ConnState>({ value: params.robot || "", status: "idle" });
-  const [aiserver, setAiServer] = useState<ConnState>({ value: params.aiserver || "", status: "idle" });
-
-  const abortRef = useRef<AbortController | null>(null);
-  const saveTimer = useRef<any>(null);
-
-  const scheduleSave = (key: ConnKey, value: string) => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await AsyncStorage.setItem(STORAGE_KEYS[key], value.trim());
-      } catch {
-        // sessiz
-      }
-    }, 250);
-  };
-
-  useEffect(() => {
-    return () => {
-   
-      try {
-        abortRef.current?.abort();
-      } catch {}
-      abortRef.current = null;
-
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [gw, rb, ai] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.gateway),
-          AsyncStorage.getItem(STORAGE_KEYS.robot),
-          AsyncStorage.getItem(STORAGE_KEYS.aiserver),
-        ]);
-
-        setGateway((s) => ({ ...s, value: s.value || (gw || "").trim() }));
-        setRobot((s) => ({ ...s, value: s.value || (rb || "").trim() }));
-        setAiServer((s) => ({ ...s, value: s.value || (ai || "").trim() }));
-      } catch {
-        // sessiz
-      }
-    })();
-  }, []);
+  // input değiştirilirken “connecting” ise iptal UX’i
+  // (connect içinde iptal yok; ama UI açısından mesajı temizleriz)
+  const editCancelRef = useRef<any>(null);
 
   const selectedState = useMemo(() => {
     if (selected === "gateway") return gateway;
@@ -106,31 +44,29 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
     return aiserver;
   }, [selected, gateway, robot, aiserver]);
 
-  const setStatus = (key: ConnKey, patch: Partial<ConnState>) => {
-    if (key === "gateway") setGateway((s) => ({ ...s, ...patch }));
-    if (key === "robot") setRobot((s) => ({ ...s, ...patch }));
-    if (key === "aiserver") setAiServer((s) => ({ ...s, ...patch }));
-  };
+  // Route param ile gelen value’ları bir kere state’e yaz (UI aynı kalsın)
+  useEffect(() => {
+    if (params.gateway) setValue("gateway", params.gateway).catch(() => {});
+    if (params.robot) setValue("robot", params.robot).catch(() => {});
+    if (params.aiserver) setValue("aiserver", params.aiserver).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Ekrana geri gelince selected paramını koru (isteğe bağlı)
+  useFocusEffect(
+    React.useCallback(() => {
+      if (params.selected) setSelected(params.selected);
+    }, [params.selected])
+  );
 
   const setSelectedValue = (value: string) => {
-    // connecting iken değişirse iptal
-    if (selectedState.status === "connecting" && abortRef.current) {
-      try {
-        abortRef.current.abort();
-      } catch {}
-      abortRef.current = null;
+    if (editCancelRef.current) clearTimeout(editCancelRef.current);
 
-      setStatus(selected, { status: "idle", message: "Cancelled." });
-    }
-
-    setStatus(selected, { value, message: undefined });
-
-    scheduleSave(selected, value);
+    // “connecting iken edit” => küçük UX: 200ms sonra value set
+    editCancelRef.current = setTimeout(() => {
+      setValue(selected, value).catch(() => {});
+    }, 50);
   };
-
-  const canGoModeSelection = useMemo(() => {
-    return !!gateway.value.trim() && !!robot.value.trim();
-  }, [gateway.value, robot.value]);
 
   const ensureGatewayEntered = () => {
     if (!gateway.value.trim()) {
@@ -140,6 +76,10 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
     }
     return true;
   };
+
+  const canGoModeSelection = useMemo(() => {
+    return !!gateway.value.trim() && !!robot.value.trim();
+  }, [gateway.value, robot.value]);
 
   const connectSelected = async () => {
     const key = selected;
@@ -151,87 +91,27 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
     }
     if (key !== "gateway" && !ensureGatewayEntered()) return;
 
-    // tek istek
     try {
-      abortRef.current?.abort();
-    } catch {}
-    abortRef.current = null;
+      await connect(key);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setStatus(key, { status: "connecting", message: "Connecting..." });
-
-    try {
-      // 1) Gateway ping
-      if (key === "gateway") {
-        const base = normalizeBaseUrl(value);
-        const resp = await fetch(`${base}/api/status`, { method: "GET", signal: controller.signal });
-
-        if (!resp.ok) throw new Error(`Gateway not reachable (HTTP ${resp.status}).`);
-
-        setStatus("gateway", { status: "connected", message: "Gateway connected.", lastOkAt: Date.now() });
-        await AsyncStorage.setItem(STORAGE_KEYS.gateway, value);
-
-        // ✅ Eğer buraya bir “eksik bağlantı” akışından geldiysek ModeSelection’a geri dön
-        if (params.nextRoute && (params.returnTo === "ModeSelect" || !params.returnTo)) {
-          navigation.replace("ModeSelect", { autoNavigateTo: params.nextRoute });
-        }
-        return;
-      }
-
-      // 2) Robot connect via gateway
-      if (key === "robot") {
-        const gwBase = normalizeBaseUrl(gateway.value.trim());
-        const resp = await fetch(`${gwBase}/api/connect`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({ ip: value }),
-        });
-
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || data?.ok === false) {
-          throw new Error(data?.message || `Robot connect failed (HTTP ${resp.status}).`);
-        }
-
-        setStatus("robot", { status: "connected", message: "Robot connected via Gateway.", lastOkAt: Date.now() });
-        await AsyncStorage.setItem(STORAGE_KEYS.robot, value);
-
-        if (params.nextRoute && (params.returnTo === "ModeSelect" || !params.returnTo)) {
-          navigation.replace("ModeSelect", { autoNavigateTo: params.nextRoute });
-        }
-        return;
-      }
-
-      // 3) AI server set via gateway
-      if (key === "aiserver") {
-        const gwBase = normalizeBaseUrl(gateway.value.trim());
-        const resp = await fetch(`${gwBase}/api/ai_server`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({ url: value }),
-        });
-
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || data?.ok === false) {
-          throw new Error(data?.message || `AI Server setup failed (HTTP ${resp.status}).`);
-        }
-
-        setStatus("aiserver", { status: "connected", message: "AI Server configured via Gateway.", lastOkAt: Date.now() });
-        await AsyncStorage.setItem(STORAGE_KEYS.aiserver, value);
-
-        if (params.nextRoute && (params.returnTo === "ModeSelect" || !params.returnTo)) {
-          navigation.replace("ModeSelect", { autoNavigateTo: params.nextRoute });
-        }
-        return;
+      if (params.nextRoute && (params.returnTo === "ModeSelect" || !params.returnTo)) {
+        navigation.replace("ModeSelect", { autoNavigateTo: params.nextRoute });
       }
     } catch (e: any) {
-      if (e?.name === "AbortError") setStatus(key, { status: "idle", message: "Cancelled." });
-      else setStatus(key, { status: "error", message: e?.message || "Connection failed." });
-    } finally {
-      abortRef.current = null;
+      Alert.alert("Connection failed", e?.message || "Connection failed.");
+    }
+  };
+
+  const disconnectSelected = async () => {
+    const key = selected;
+
+    // buton zaten disabled olacak ama guard kalsın
+    if (selectedState.status !== "connected") return;
+
+    try {
+      await disconnect(key);
+    } catch (e: any) {
+      Alert.alert("Disconnect failed", e?.message || "Disconnect failed.");
     }
   };
 
@@ -265,8 +145,14 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
         <View style={[styles.dot, dotStyle]} />
         <View style={{ flex: 1 }}>
           <Text style={styles.sideTitle}>{title}</Text>
-          <Text style={styles.sideSub} numberOfLines={1}>{subtitle}</Text>
-          {!!st.value && <Text style={styles.sideValue} numberOfLines={1}>{st.value}</Text>}
+          <Text style={styles.sideSub} numberOfLines={1}>
+            {subtitle}
+          </Text>
+          {!!st.value && (
+            <Text style={styles.sideValue} numberOfLines={1}>
+              {st.value}
+            </Text>
+          )}
         </View>
       </Pressable>
     );
@@ -298,6 +184,9 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
     );
   }
 
+  const isDisconnectEnabled = selectedState.status === "connected";
+  const isConnectEnabled = selectedState.status !== "connecting";
+
   return (
     <ImageBackground source={require("../../assets/splash.jpg")} style={styles.bg} resizeMode="cover">
       <View style={styles.dim} />
@@ -305,16 +194,12 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
       <View style={styles.root}>
         {/* Sidebar */}
         <View style={styles.sidebar}>
-          <ScrollView
-            style={{ flex: 1 }}                       
-            contentContainerStyle={styles.sidebarInner}
-            showsVerticalScrollIndicator={false}
-          >
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.sidebarInner} showsVerticalScrollIndicator={false}>
             <View>
               <View style={styles.brand}>
                 <View style={styles.brandLogo}>
-                    <MaterialCommunityIcons name="robot-industrial-outline" size={24} color="black" />
-                    </View>
+                  <MaterialCommunityIcons name="robot-industrial-outline" size={24} color="black" />
+                </View>
                 <View>
                   <Text style={styles.brandTitle}>xArm Controller</Text>
                   <Text style={styles.brandSub}>Connection Hub</Text>
@@ -402,17 +287,34 @@ export default function ConnectionHubScreen({ navigation, route }: any) {
               </Text>
             )}
 
-            <Pressable onPress={connectSelected} style={({ pressed }) => [styles.primaryBtn, pressed ? { opacity: 0.9 } : null]}>
-              <Text style={styles.primaryText}>
-                {selected === "gateway"
-                  ? "Connect Gateway"
-                  : selected === "robot"
-                  ? "Connect Robot (via Gateway)"
-                  : "Set AI Server (via Gateway)"}
-              </Text>
-            </Pressable>
+            {/* CONNECT + DISCONNECT (yan yana) */}
+            <View style={styles.btnRow}>
+              <Pressable
+                disabled={!isConnectEnabled}
+                onPress={connectSelected}
+                style={({ pressed }) => [
+                  styles.primaryBtnHalf,
+                  !isConnectEnabled ? styles.btnDisabled : null,
+                  pressed && isConnectEnabled ? { opacity: 0.9 } : null,
+                ]}
+              >
+                <Text style={styles.primaryText}>Connect</Text>
+              </Pressable>
 
-            <Text style={styles.hint}>If you edit the address while connecting, the attempt is cancelled.</Text>
+              <Pressable
+                disabled={!isDisconnectEnabled}
+                onPress={disconnectSelected}
+                style={({ pressed }) => [
+                  styles.dangerBtnHalf,
+                  !isDisconnectEnabled ? styles.btnDisabled : null,
+                  pressed && isDisconnectEnabled ? { opacity: 0.9 } : null,
+                ]}
+              >
+                <Text style={styles.primaryText}>Disconnect</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.hint}>Status is live via WebSocket. If you edit an address, state stays consistent.</Text>
 
             <View style={styles.divider} />
 
@@ -451,13 +353,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     padding: 14,
     gap: 14,
-    alignItems: "stretch", 
+    alignItems: "stretch",
   },
 
   sidebar: {
     width: 280,
-    flexShrink: 0,        
-    alignSelf: "stretch",  
+    flexShrink: 0,
+    alignSelf: "stretch",
     borderRadius: 22,
     backgroundColor: "rgba(18, 27, 47, 0.72)",
     borderWidth: 1,
@@ -467,18 +369,32 @@ const styles = StyleSheet.create({
   sidebarInner: {
     padding: 16,
     paddingBottom: 18,
-    flexGrow: 1,      
+    flexGrow: 1,
     justifyContent: "space-between",
   },
 
   brand: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 16 },
-  brandLogo: { width: 44, height: 44, borderRadius: 12, backgroundColor: "rgba(37, 99, 235, 0.95)", alignItems: "center", justifyContent: "center" },
-  brandLogoText: { color: "white", fontWeight: "900", fontSize: 18 },
+  brandLogo: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: "rgba(37, 99, 235, 0.95)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   brandTitle: { color: "white", fontWeight: "900", fontSize: 16 },
   brandSub: { color: "rgba(255,255,255,0.55)", marginTop: 2, fontSize: 12 },
 
   sideSection: { gap: 10 },
-  sideItem: { flexDirection: "row", gap: 10, padding: 12, borderRadius: 16, backgroundColor: "rgba(0,0,0,0.16)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  sideItem: {
+    flexDirection: "row",
+    gap: 10,
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: "rgba(0,0,0,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
   sideItemActive: { borderColor: "rgba(37, 99, 235, 0.65)", backgroundColor: "rgba(37, 99, 235, 0.12)" },
   sideTitle: { color: "white", fontWeight: "900", fontSize: 13 },
   sideSub: { color: "rgba(255,255,255,0.60)", fontSize: 11, marginTop: 2 },
@@ -494,19 +410,51 @@ const styles = StyleSheet.create({
   dotRed: { backgroundColor: "rgba(239, 68, 68, 1)" },
   dotGray: { backgroundColor: "rgba(148, 163, 184, 1)" },
 
-  main: { flex: 1, borderRadius: 22, backgroundColor: "rgba(18, 27, 47, 0.72)", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)", overflow: "hidden" },
-  mainHeader: { padding: 16, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.08)", flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 10 },
+  main: {
+    flex: 1,
+    borderRadius: 22,
+    backgroundColor: "rgba(18, 27, 47, 0.72)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    overflow: "hidden",
+  },
+  mainHeader: {
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+  },
   hTitle: { color: "white", fontSize: 22, fontWeight: "900" },
   hDesc: { color: "rgba(255,255,255,0.65)", marginTop: 6, maxWidth: 680 },
 
-  headerPill: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: "rgba(255,255,255,0.10)", backgroundColor: "rgba(0,0,0,0.20)" },
+  headerPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    backgroundColor: "rgba(0,0,0,0.20)",
+  },
   pillDot: { width: 10, height: 10, borderRadius: 99 },
   pillText: { color: "rgba(255,255,255,0.75)", fontSize: 12, fontWeight: "800" },
 
   mainBody: { padding: 16, paddingBottom: 18 },
   label: { color: "rgba(255,255,255,0.78)", fontWeight: "800", marginBottom: 8 },
 
-  inputWrap: { position: "relative", borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)", backgroundColor: "rgba(0,0,0,0.18)" },
+  inputWrap: {
+    position: "relative",
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    backgroundColor: "rgba(0,0,0,0.18)",
+  },
   input: { paddingHorizontal: 14, paddingVertical: 14, color: "white", fontSize: 16, fontFamily: "monospace" },
   spinner: { position: "absolute", right: 12, top: 0, bottom: 0, justifyContent: "center" },
 
@@ -514,20 +462,54 @@ const styles = StyleSheet.create({
   msgOk: { color: "rgba(34, 197, 94, 0.95)" },
   msgErr: { color: "rgba(239, 68, 68, 0.95)" },
 
-  primaryBtn: { marginTop: 14, borderRadius: 16, paddingVertical: 14, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(37, 99, 235, 0.92)", borderWidth: 1, borderColor: "rgba(37, 99, 235, 0.65)" },
+  btnRow: { marginTop: 14, flexDirection: "row", gap: 10 },
+  primaryBtnHalf: {
+    flex: 1,
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(37, 99, 235, 0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(37, 99, 235, 0.65)",
+  },
+  dangerBtnHalf: {
+    flex: 1,
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(239, 68, 68, 0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.65)",
+  },
+  btnDisabled: { opacity: 0.45 },
   primaryText: { color: "white", fontWeight: "900", fontSize: 15 },
 
   hint: { marginTop: 10, color: "rgba(255,255,255,0.40)", fontSize: 12, textAlign: "center", fontStyle: "italic" },
 
   divider: { marginTop: 16, marginBottom: 12, height: 1, backgroundColor: "rgba(255,255,255,0.08)" },
 
-  goBtn: { borderRadius: 16, paddingVertical: 13, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,0.10)", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)" },
+  goBtn: {
+    borderRadius: 16,
+    paddingVertical: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
   goBtnDisabled: { opacity: 0.45 },
   goBtnText: { color: "rgba(255,255,255,0.85)", fontWeight: "900" },
 
   smallNote: { marginTop: 10, color: "rgba(255,255,255,0.45)", fontSize: 11, textAlign: "center" },
 
-  mainFooter: { padding: 10, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)", backgroundColor: "rgba(0,0,0,0.12)" },
+  mainFooter: {
+    padding: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "rgba(0,0,0,0.12)",
+  },
   footerText: { color: "rgba(255,255,255,0.38)", fontSize: 11, textAlign: "center" },
 
   rotateWrap: { flex: 1, backgroundColor: "#0B1220", alignItems: "center", justifyContent: "center", padding: 22 },
