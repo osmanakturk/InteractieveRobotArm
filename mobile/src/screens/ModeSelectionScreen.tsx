@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import {
   Alert,
   Image,
@@ -9,9 +9,9 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
-import { STORAGE_KEYS } from "../screens/SplashScreen"; 
+
+import { useConnection, ConnKey } from "../connection/ConnectionContext";
 
 type TileItem = {
   title: string;
@@ -20,48 +20,20 @@ type TileItem = {
   icon: any;
 };
 
-type ConnKey = keyof typeof STORAGE_KEYS;
-
 export default function ModeSelectionScreen({ navigation, route }: any) {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
   const autoNavigateTo: TileItem["routeName"] | undefined = route?.params?.autoNavigateTo;
 
-  const [conn, setConn] = useState({ gateway: "", robot: "", aiserver: "" });
-
-  const loadConn = async () => {
-    try {
-      const [gw, rb, ai] = await Promise.all([
-        AsyncStorage.getItem(STORAGE_KEYS.gateway),
-        AsyncStorage.getItem(STORAGE_KEYS.robot),
-        AsyncStorage.getItem(STORAGE_KEYS.aiserver),
-      ]);
-      setConn({
-        gateway: (gw || "").trim(),
-        robot: (rb || "").trim(),
-        aiserver: (ai || "").trim(),
-      });
-    } catch {
-      setConn({ gateway: "", robot: "", aiserver: "" });
-    }
-  };
-
-
-  useFocusEffect(
-    React.useCallback(() => {
-      loadConn();
-    }, [])
-  );
+  const { gateway, robot, aiserver } = useConnection();
 
   useFocusEffect(
     React.useCallback(() => {
       if (!autoNavigateTo) return;
 
-      // paramı bir kere kullan: tekrar tekrar navigate etmesin
       navigation.setParams({ autoNavigateTo: undefined });
 
-      // tekrar kontrol edip git
       setTimeout(() => {
         handleTilePress(autoNavigateTo);
       }, 0);
@@ -100,9 +72,9 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
       selected,
       nextRoute,
       returnTo: "ModeSelect",
-      gateway: conn.gateway,
-      robot: conn.robot,
-      aiserver: conn.aiserver,
+      gateway: gateway.value,
+      robot: robot.value,
+      aiserver: aiserver.value,
     });
   };
 
@@ -125,24 +97,18 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
     ]);
   };
 
-  /**
-   * ✅ Mantıklı sıra:
-   * 1) Gateway (her mod)
-   * 2) Robot (her mod)
-   * 3) AI Server (sadece PickPlace/Voice)
-   */
   const handleTilePress = (routeName: TileItem["routeName"]) => {
-    if (!conn.gateway) return showMissingAlert("gateway", routeName);
-    if (!conn.robot) return showMissingAlert("robot", routeName);
+    if (!gateway.value.trim()) return showMissingAlert("gateway", routeName);
+    if (!robot.value.trim()) return showMissingAlert("robot", routeName);
 
-    if ((routeName === "PickPlace" || routeName === "Voice") && !conn.aiserver) {
+    if ((routeName === "PickPlace" || routeName === "Voice") && !aiserver.value.trim()) {
       return showMissingAlert("aiserver", routeName);
     }
 
     navigation.navigate(routeName, {
-      gateway: conn.gateway,
-      robot: conn.robot,
-      aiserver: conn.aiserver,
+      gateway: gateway.value,
+      robot: robot.value,
+      aiserver: aiserver.value,
     });
   };
 
@@ -174,10 +140,11 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
           <Text style={styles.title}>Select Mode</Text>
           <Text style={styles.subtitle}>Choose how you want to control the xArm.</Text>
 
-          {!!conn.gateway && (
+          {!!gateway.value && (
             <View style={styles.badge}>
               <Text style={styles.badgeText} numberOfLines={1}>
-                Gateway: {conn.gateway} • Robot: {conn.robot ? "OK" : "Missing"} • AI: {conn.aiserver ? "OK" : "Optional"}
+                Gateway: {gateway.status === "connected" ? "OK" : "Set"} • Robot: {robot.status === "connected" ? "OK" : robot.value ? "Set" : "Missing"} • AI:{" "}
+                {aiserver.status === "connected" ? "OK" : aiserver.value ? "Set" : "Optional"}
               </Text>
             </View>
           )}
@@ -265,10 +232,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "rgba(5, 10, 22, 0.20)",
   },
-  tileImage: { 
-    width: "100%", 
-    //height: "100%" 
-  },
+  tileImage: { width: "100%" },
 
   tileContent: {
     paddingHorizontal: 12,

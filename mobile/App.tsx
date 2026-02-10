@@ -11,6 +11,7 @@ import ManualControlScreen from "./src/screens/ManualControlScreen";
 import PickPlaceScreen from "./src/screens/PickPlaceScreen";
 import VoiceControlScreen from "./src/screens/VoiceControlScreen";
 import ServerPCConnectionScreen from "./src/screens/ServerPCConnectionScreen";
+import { ConnectionProvider } from './src/connection/ConnectionContext';
 import TestScreen from "./src/screens/TestScreen";
 
 
@@ -21,8 +22,9 @@ const Stack = createNativeStackNavigator();
 
 export default function App() {
   return (
+    <ConnectionProvider>
     <NavigationContainer>
-      <Stack.Navigator initialRouteName="Test" screenOptions={{ headerShown: false }}>
+      <Stack.Navigator initialRouteName="Splash" screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Test" component={TestScreen} />
         <Stack.Screen name="Splash" component={SplashScreen} />
         <Stack.Screen name="ConnectionHub" component={ConnectionHubScreen} />
@@ -35,6 +37,7 @@ export default function App() {
         <Stack.Screen name="Voice" component={VoiceControlScreen} />
       </Stack.Navigator>
     </NavigationContainer>
+    </ConnectionProvider>
   );
 }
 

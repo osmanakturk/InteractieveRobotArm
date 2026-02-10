@@ -31,7 +31,7 @@ export default function SplashScreen({ navigation }: any) {
       if (navigatedRef.current) return;
       navigatedRef.current = true;
 
-      navigation.replace("Manual", { selected: "gateway" });
+      navigation.replace("ConnectionHub", { selected: "gateway" });
     };
 
     boot();
