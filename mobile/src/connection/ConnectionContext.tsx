@@ -43,17 +43,12 @@ type ConnectionContextValue = {
   robot: ConnState;
   aiserver: ConnState;
 
-  // canlı backend status (WS payload)
   live: LiveStatusPayload | null;
   wsConnected: boolean;
 
   setValue: (key: ConnKey, value: string) => Promise<void>;
-
   connect: (key: ConnKey) => Promise<void>;
   disconnect: (key: ConnKey) => Promise<void>;
-
-  // manuel refresh gerekiyorsa (WS yoksa) — ama biz normalde kullanmayacağız
-  // syncStatus: () => Promise<void>;
 };
 
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
@@ -83,42 +78,55 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const reconnectTimerRef = useRef<any>(null);
   const reconnectAttemptsRef = useRef(0);
 
-  const stopWs = () => {
+  // ✅ “Ben kapattım” durumunda reconnect etmesin
+  const intentionalCloseRef = useRef(false);
+
+  const clearReconnectTimer = () => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-    reconnectAttemptsRef.current = 0;
+  };
 
+  const stopWs = (reason: "manual" | "restart" | "clear") => {
+    clearReconnectTimer();
+    reconnectAttemptsRef.current = 0;
     setWsConnected(false);
 
+    intentionalCloseRef.current = true;
     try {
       wsRef.current?.close();
     } catch {}
     wsRef.current = null;
+
+    // kısa bir tick sonra tekrar otomatik kapanma flag'ini düşür (restart sonrası açılabilsin)
+    setTimeout(() => {
+      if (reason !== "manual") intentionalCloseRef.current = false;
+    }, 0);
   };
 
-  const scheduleReconnect = (base: string) => {
+  const scheduleReconnect = (baseHttp: string) => {
     const attempt = Math.min(10, reconnectAttemptsRef.current + 1);
     reconnectAttemptsRef.current = attempt;
+
     const backoffMs = Math.min(5000, 300 + attempt * 300);
 
-    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    clearReconnectTimer();
     reconnectTimerRef.current = setTimeout(() => {
-      startWs(base);
+      startWs(baseHttp);
     }, backoffMs);
   };
 
   const applyLiveToConnStates = (data: LiveStatusPayload) => {
-    // Gateway connected => WS açık demektir, gateway status'u connected sayıyoruz.
+    // Gateway connected => WS açık demektir.
     setGateway((s) => ({
       ...s,
       status: "connected",
-      message: s.message && s.status === "connected" ? s.message : undefined,
+      message: s.status === "connected" ? s.message : undefined,
       lastOkAt: Date.now(),
     }));
 
-    // Robot status backend’den gelsin
+    // Robot
     const st = data?.status || {};
     const robotConnected = !!st.connected;
     setRobot((s) => ({
@@ -128,7 +136,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       lastOkAt: robotConnected ? Date.now() : s.lastOkAt,
     }));
 
-    // AI server status
+    // AI
     const ai = data?.ai_server || {};
     const aiConfigured = !!ai.configured;
     const aiConnected = !!ai.connected;
@@ -144,7 +152,8 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const startWs = (baseHttp: string) => {
     const wsUrl = gatewayToWsUrl(baseHttp);
 
-    stopWs(); // clean
+    // restart: intentional flag’i kısa süreli true kalsın (onclose reconnect tetiklemesin)
+    stopWs("restart");
     setWsConnected(false);
 
     try {
@@ -152,20 +161,17 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       wsRef.current = ws;
 
       ws.onopen = () => {
+        intentionalCloseRef.current = false; // artık gerçek bağlantı var
         setWsConnected(true);
         reconnectAttemptsRef.current = 0;
 
-        // Gateway WS açıldı => gateway connected
         setGateway((s) => ({ ...s, status: "connected", message: undefined, lastOkAt: Date.now() }));
       };
 
       ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
-          if (!data) return;
-
-          // backend ok alanı varsa kontrol et
-          if (data.ok === false) return;
+          if (!data || data.ok === false) return;
 
           setLive(data);
           applyLiveToConnStates(data);
@@ -173,26 +179,23 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       };
 
       ws.onerror = () => {
-        // error -> onclose de gelecek; burada sadece işaretlemek yeter
         setWsConnected(false);
       };
 
       ws.onclose = () => {
         setWsConnected(false);
 
-        // gateway hala yazılıysa reconnect
-        const gw = normalizeBaseUrl(gateway.value.trim());
-        if (gw) {
-          scheduleReconnect(gw);
-        }
+        // ✅ manual/restart close ise reconnect yapma
+        if (intentionalCloseRef.current) return;
+
+        scheduleReconnect(baseHttp);
       };
     } catch {
-      // ws oluşturulamadıysa reconnect dene
       scheduleReconnect(baseHttp);
     }
   };
 
-  // 1) İlk açılış: AsyncStorage value’ları yükle
+  // 1) İlk açılış: AsyncStorage load + WS start
   useEffect(() => {
     (async () => {
       try {
@@ -210,7 +213,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         if (rbV) setRobot((s) => ({ ...s, value: rbV }));
         if (aiV) setAiServer((s) => ({ ...s, value: aiV }));
 
-        // Gateway value varsa WS başlat
         if (gwV) {
           const base = normalizeBaseUrl(gwV);
           startWs(base);
@@ -218,16 +220,18 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       } catch {}
     })();
 
-    return () => stopWs();
+    return () => stopWs("manual");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) Gateway value değişince WS’i yeniden başlat (polling yok)
+  // 2) Gateway value değişince WS restart
   useEffect(() => {
     const gwRaw = gateway.value.trim();
+
     if (!gwRaw) {
-      stopWs();
+      stopWs("clear");
       setLive(null);
+
       setGateway((s) => ({ ...s, status: "idle", message: undefined }));
       setRobot((s) => ({ ...s, status: "idle", message: undefined }));
       setAiServer((s) => ({ ...s, status: "idle", message: undefined }));
@@ -235,9 +239,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     }
 
     const base = normalizeBaseUrl(gwRaw);
-
-    // WS zaten aynı host’a bağlıysa gereksiz restart yapma:
-    // basit yaklaşım: her değişimde restart.
     startWs(base);
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -256,29 +257,28 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   };
 
   const connect = async (key: ConnKey) => {
-    // CONNECT: sadece backend’e istek atar; gerçek durum WS ile gelir.
+    // CONNECT: istek atar; gerçek durum WS ile gelir.
     if (key === "gateway") {
       const gw = normalizeBaseUrl(gateway.value.trim());
       if (!gw) throw new Error("Gateway required.");
 
       setGateway((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
 
-      // Gateway için “connect” dediğimiz şey: WS aç + status doğrulama
-      // WS zaten açılacak; ama kullanıcı “connect”e basınca hızlı feedback verelim:
-      // HTTP ping opsiyonel: (polling değil, tek seferlik doğrulama)
       const resp = await fetch(`${gw}/api/status`, { method: "GET" });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || data?.ok === false) {
-        setGateway((s) => ({ ...s, status: "error", message: data?.message || `Gateway not reachable (HTTP ${resp.status}).` }));
+        setGateway((s) => ({
+          ...s,
+          status: "error",
+          message: data?.message || `Gateway not reachable (HTTP ${resp.status}).`,
+        }));
         return;
       }
 
-      // WS effect zaten devreye girecek, burada connected set edelim:
       setGateway((s) => ({ ...s, status: "connected", message: "Gateway connected.", lastOkAt: Date.now() }));
       return;
     }
 
-    // robot / aiserver connect için gateway şart
     const gw = normalizeBaseUrl(gateway.value.trim());
     if (!gw) throw new Error("Gateway required.");
 
@@ -293,13 +293,13 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ip }),
       });
+
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || data?.ok === false) {
         setRobot((s) => ({ ...s, status: "error", message: data?.message || `Robot connect failed (HTTP ${resp.status}).` }));
         return;
       }
 
-      // gerçek “connected” WS ile update olur ama hızlı feedback:
       setRobot((s) => ({ ...s, status: "connected", message: "Robot connected via Gateway.", lastOkAt: Date.now() }));
       return;
     }
@@ -315,6 +315,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
+
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || data?.ok === false) {
         setAiServer((s) => ({ ...s, status: "error", message: data?.message || `AI connect failed (HTTP ${resp.status}).` }));
@@ -330,7 +331,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     const gw = normalizeBaseUrl(gateway.value.trim());
 
     if (key === "gateway") {
-      // backend reset + ws stop
       if (gw) {
         await fetch(`${gw}/api/gateway/disconnect`, {
           method: "POST",
@@ -339,7 +339,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         }).catch(() => {});
       }
 
-      stopWs();
+      stopWs("manual");
       setLive(null);
 
       setGateway((s) => ({ ...s, status: "idle", message: "Gateway disconnected." }));
@@ -364,16 +364,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   };
 
   const value = useMemo<ConnectionContextValue>(
-    () => ({
-      gateway,
-      robot,
-      aiserver,
-      live,
-      wsConnected,
-      setValue,
-      connect,
-      disconnect,
-    }),
+    () => ({ gateway, robot, aiserver, live, wsConnected, setValue, connect, disconnect }),
     [gateway, robot, aiserver, live, wsConnected]
   );
 

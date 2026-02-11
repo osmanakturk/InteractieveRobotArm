@@ -28,13 +28,14 @@ export default function App() {
         <Stack.Screen name="Test" component={TestScreen} />
         <Stack.Screen name="Splash" component={SplashScreen} />
         <Stack.Screen name="ConnectionHub" component={ConnectionHubScreen} />
-        <Stack.Screen name="SystemConnect" component={SystemConnectionScreen} />
-        <Stack.Screen name="RobotConnect" component={RobotConnectionScreen} />
-        <Stack.Screen name="ServerPCConnect" component={ServerPCConnectionScreen} />
         <Stack.Screen name="ModeSelect" component={ModeSelectionScreen} />
         <Stack.Screen name="Manual" component={ManualControlScreen} />
         <Stack.Screen name="PickPlace" component={PickPlaceScreen} />
         <Stack.Screen name="Voice" component={VoiceControlScreen} />
+
+        <Stack.Screen name="SystemConnect" component={SystemConnectionScreen} />
+        <Stack.Screen name="RobotConnect" component={RobotConnectionScreen} />
+        <Stack.Screen name="ServerPCConnect" component={ServerPCConnectionScreen} />
       </Stack.Navigator>
     </NavigationContainer>
     </ConnectionProvider>
