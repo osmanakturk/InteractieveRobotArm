@@ -76,3 +76,5 @@ yarn-error.*
 .vscode/
 .idea/
 *.iml
+*.dylib
+*.so
