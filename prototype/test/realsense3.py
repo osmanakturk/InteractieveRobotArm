@@ -1,10 +1,17 @@
 import pyrealsense2 as rs
 import numpy as np
-import cv2
+import cv2, time
 
 # --- KURULUM ---
 pipeline = rs.pipeline()
 config = rs.config()
+ctx = rs.context()
+if len(ctx.query_devices()) > 0:
+    dev = ctx.query_devices()[0]
+    dev.hardware_reset()
+    print("🔄 Kamera donanımsal olarak resetlendi. 5 saniye bekleniyor...")
+    time.sleep(5)
+
 
 # --- KRİTİK AYAR BURADA ---
 # 15 cm altını görmek için çözünürlüğü düşürmek ZORUNDAYIZ.
