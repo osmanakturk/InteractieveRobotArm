@@ -1,28 +1,32 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+// src/screens/ManualControlScreen.tsx
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   ImageBackground,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
   useWindowDimensions,
+  LayoutChangeEvent,
+  GestureResponderEvent,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
+import { useFocusEffect } from "@react-navigation/native";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import { useConnection } from "../connection/ConnectionContext";
 
+// --- Types ---
 type JogFrame = "Base" | "Tool";
 type ControlMode = "XYZ" | "RXYZ";
-
-const STORAGE_KEYS = {
-  gateway: "@conn/gateway",
-  robot: "@conn/robot",
-  aiserver: "@conn/aiserver",
-} as const;
-
 type DotStatus = "idle" | "connecting" | "connected" | "error";
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
 
 function normalizeBaseUrl(input: string) {
   const raw = (input || "").trim();
@@ -31,140 +35,167 @@ function normalizeBaseUrl(input: string) {
   return raw;
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+async function safeJson(resp: Response) {
+  try {
+    return await resp.json();
+  } catch {
+    return {};
+  }
 }
 
-function pctToBarWidth(pct: number) {
+function pctToWidth(pct: number) {
   const v = clamp(pct, 0, 100);
   return `${v}%`;
 }
 
-function dotStyleFor(status: DotStatus, styles: any) {
-  return status === "connected"
-    ? styles.dotGreen
-    : status === "connecting"
-    ? styles.dotBlue
-    : status === "error"
-    ? styles.dotRed
-    : styles.dotGray;
+function dotStyle(status: DotStatus) {
+  if (status === "connected") return styles.dotGreen;
+  if (status === "connecting") return styles.dotBlue;
+  if (status === "error") return styles.dotRed;
+  return styles.dotGray;
 }
 
-// --- Small, non-layout-shifting dropdown (modal) ---
-function Dropdown({
+/** Small icon button */
+function IconBtn({
+  icon,
   label,
-  value,
-  options,
-  onChange,
+  onPress,
+  tone = "ghost",
+  disabled,
 }: {
-  label: string; // e.g. "Jog Frame"
-  value: string; // e.g. "Tool"
-  options: { key: string; title: string; subtitle?: string }[];
-  onChange: (key: string) => void;
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  label?: string;
+  onPress: () => void;
+  tone?: "ghost" | "primary" | "danger";
+  disabled?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-
   return (
-    <>
-      <Pressable
-        onPress={() => setOpen(true)}
-        style={({ pressed }) => [styles.dd, pressed ? { opacity: 0.92 } : null]}
-      >
-        <Text style={styles.ddText} numberOfLines={1}>
-          {label}: {value}
-        </Text>
-        <Text style={styles.ddChevron}>{open ? "▲" : "▼"}</Text>
-      </Pressable>
-
-      {open && (
-        <View style={styles.modalOverlay}>
-          <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setOpen(false)} />
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>{label}</Text>
-
-            <View style={{ gap: 10 }}>
-              {options.map((o) => (
-                <Pressable
-                  key={o.key}
-                  onPress={() => {
-                    onChange(o.key);
-                    setOpen(false);
-                  }}
-                  style={({ pressed }) => [
-                    styles.modalItem,
-                    o.key === value ? styles.modalItemActive : null,
-                    pressed ? { opacity: 0.92 } : null,
-                  ]}
-                >
-                  <Text style={styles.modalItemTitle}>{o.title}</Text>
-                  {!!o.subtitle && <Text style={styles.modalItemSub}>{o.subtitle}</Text>}
-                </Pressable>
-              ))}
-            </View>
-
-            <Pressable onPress={() => setOpen(false)} style={styles.modalClose}>
-              <Text style={styles.modalCloseText}>Close</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-    </>
+    <Pressable
+      disabled={!!disabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.iconBtn,
+        tone === "primary" ? styles.iconBtnPrimary : tone === "danger" ? styles.iconBtnDanger : null,
+        disabled ? { opacity: 0.45 } : null,
+        pressed && !disabled ? { opacity: 0.9 } : null,
+      ]}
+    >
+      <MaterialCommunityIcons name={icon} size={18} color="white" />
+      {!!label && <Text style={styles.iconBtnText}>{label}</Text>}
+    </Pressable>
   );
 }
 
-// --- Hold button (press&hold jog) ---
+function SectionTitle({ title }: { title: string }) {
+  return <Text style={styles.sectionTitle}>{title}</Text>;
+}
+
+function Row({ children }: { children: React.ReactNode }) {
+  return <View style={styles.row}>{children}</View>;
+}
+
+function Divider() {
+  return <View style={styles.divider} />;
+}
+
+function PillToggle({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.pillToggle,
+        active ? styles.pillToggleActive : null,
+        pressed ? { opacity: 0.92 } : null,
+      ]}
+    >
+      <Text style={styles.pillToggleText}>{label}</Text>
+    </Pressable>
+  );
+}
+
 function HoldBtn({
   label,
   onPress,
   onHoldStart,
   onHoldEnd,
-  variant = "ghost",
+  disabled,
 }: {
   label: string;
   onPress?: () => void;
   onHoldStart?: () => void;
   onHoldEnd?: () => void;
-  variant?: "ghost" | "danger" | "primary";
+  disabled?: boolean;
 }) {
-  const timerRef = useRef<any>(null);
-  const holdingRef = useRef(false);
+  return (
+    <Pressable
+      disabled={!!disabled}
+      onPress={onPress}
+      onPressIn={onHoldStart}
+      onPressOut={onHoldEnd}
+      style={({ pressed }) => [
+        styles.holdBtn,
+        disabled ? { opacity: 0.4 } : null,
+        pressed && !disabled ? { opacity: 0.92, transform: [{ scale: 0.99 }] } : null,
+      ]}
+    >
+      <Text style={styles.holdBtnText}>{label}</Text>
+    </Pressable>
+  );
+}
 
-  const bg =
-    variant === "danger"
-      ? styles.btnDanger
-      : variant === "primary"
-      ? styles.btnPrimary
-      : styles.btn;
+function BarCard({ title, rightText, valuePct }: { title: string; rightText: string; valuePct: number }) {
+  return (
+    <View style={styles.barCard}>
+      <View style={styles.barCardTop}>
+        <Text style={styles.barCardTitle}>{title}</Text>
+        <Text style={styles.barCardSub}>{rightText}</Text>
+      </View>
+      <View style={styles.barTrack}>
+        <View style={[styles.barFill, { width: pctToWidth(valuePct) }]} />
+      </View>
+    </View>
+  );
+}
 
-  const handlePressIn = () => {
-    if (!onHoldStart) return;
-    holdingRef.current = true;
-    onHoldStart();
+/** Progress bar that supports tap + drag */
+function ProgressSlider({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number; // 0..100
+  onChange: (pct: number) => void;
+  disabled?: boolean;
+}) {
+  const [w, setW] = useState(240);
 
-    // optional repeat pulse (if you later want repeated calls)
-    timerRef.current = setInterval(() => {
-      if (!holdingRef.current) return;
-      // You can send repeated jog pulses here if your API is pulse-based.
-      // In this implementation we assume "start" once is enough (server runs until stop).
-    }, 250);
+  const setByX = (x: number) => {
+    const pct = clamp(Math.round((x / Math.max(1, w)) * 100), 1, 100);
+    onChange(pct);
   };
 
-  const handlePressOut = () => {
-    holdingRef.current = false;
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = null;
-    onHoldEnd?.();
+  const onLayout = (e: LayoutChangeEvent) => {
+    setW(Math.max(1, Math.round(e.nativeEvent.layout.width)));
+  };
+
+  const onPress = (e: GestureResponderEvent) => {
+    if (disabled) return;
+    setByX(e.nativeEvent.locationX);
   };
 
   return (
-    <Pressable
-      onPress={onPress}
-      onPressIn={handlePressIn}
-      onPressOut={handlePressOut}
-      style={({ pressed }) => [bg, pressed ? { opacity: 0.92 } : null]}
+    <View
+      style={[styles.sliderWrap, disabled ? { opacity: 0.5 } : null]}
+      onLayout={onLayout}
+      onStartShouldSetResponder={() => !disabled}
+      onResponderGrant={(e) => setByX(e.nativeEvent.locationX)}
+      onResponderMove={(e) => setByX(e.nativeEvent.locationX)}
     >
-      <Text style={styles.btnText}>{label}</Text>
-    </Pressable>
+      <Pressable onPress={onPress} style={styles.sliderTrack}>
+        <View style={[styles.sliderFill, { width: pctToWidth(value) }]} />
+        <View style={[styles.sliderKnob, { left: `${clamp(value, 1, 100)}%` }]} />
+      </Pressable>
+    </View>
   );
 }
 
@@ -172,194 +203,277 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
-  const [gatewayUrl, setGatewayUrl] = useState<string>(route?.params?.gateway || "");
-  const [robotIp, setRobotIp] = useState<string>(route?.params?.robot || "");
+  const { gateway, robot, aiserver, live, wsConnected } = useConnection();
 
-  const [gatewayStatus, setGatewayStatus] = useState<DotStatus>("idle");
-  const [robotStatus, setRobotStatus] = useState<DotStatus>("idle");
+  const gatewayFromParams: string = route?.params?.gateway || route?.params?.baseUrl || "";
+  const gatewayBase = useMemo(
+    () => normalizeBaseUrl(gateway.value || gatewayFromParams),
+    [gateway.value, gatewayFromParams]
+  );
 
-  const [enabled, setEnabled] = useState(false);
+  // ✅ Correct camera endpoint (MJPEG stream)
+  const cameraUrl = useMemo(
+    () => (gatewayBase ? `${gatewayBase}/api/camera/realsense` : ""),
+    [gatewayBase]
+  );
 
+  // --- UI state ---
   const [frame, setFrame] = useState<JogFrame>("Tool");
   const [mode, setMode] = useState<ControlMode>("XYZ");
 
-  const [speedPct, setSpeedPct] = useState(35); // 0..100 step 5
-  const [gripperPct, setGripperPct] = useState(0); // 0..100
+  const [leftOpen, setLeftOpen] = useState(false);
+  const [rightOpen, setRightOpen] = useState(false);
 
-  const abortRef = useRef<AbortController | null>(null);
+  const [speedPct, setSpeedPct] = useState<number>(35);
 
-  const base = useMemo(() => normalizeBaseUrl(gatewayUrl), [gatewayUrl]);
-  const cameraUrl = useMemo(() => (base ? `${base}/api/camera/realsense` : ""), [base]);
+  const [gripperPct, setGripperPct] = useState<number>(0);
+  const [gripperLoading, setGripperLoading] = useState(false);
 
-  const leftW = useMemo(() => clamp(Math.round(width * 0.24), 240, 290), [width]);
-  const rightW = useMemo(() => clamp(Math.round(width * 0.26), 260, 320), [width]);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [cameraStarted, setCameraStarted] = useState<boolean>(false);
+  const [cameraLastError, setCameraLastError] = useState<string>("");
 
-  const disconnect = async () => {
-    setEnabled(false);
-    // Optionally tell gateway to stop + disable
-    try {
-      if (base) {
-        await fetch(`${base}/api/robot/stop`, { method: "POST" }).catch(() => {});
-        await fetch(`${base}/api/robot/disable`, { method: "POST" }).catch(() => {});
+  // hold-to-jog loop
+  const jogTimer = useRef<any>(null);
+  const jogAbort = useRef<boolean>(false);
+
+  const robotConnected = !!live?.status?.connected;
+  const enabled = !!live?.status?.is_enabled;
+  const safetyMsg = (live as any)?.safety?.message || "";
+  const safetyLimit = !!(live as any)?.safety?.limit_hit;
+
+  // Dots (no top big boxes)
+  const gwDot: DotStatus = wsConnected ? "connected" : gatewayBase ? "error" : "idle";
+  const rbDot: DotStatus = robotConnected ? "connected" : robot.value.trim() ? "idle" : "idle";
+  const aiDot: DotStatus =
+    aiserver.status === "connected" ? "connected" : aiserver.status === "error" ? "error" : "idle";
+  const camDot: DotStatus = cameraStarted ? "connected" : "idle";
+
+  // --- API helpers ---
+  const apiPost = useCallback(
+    async (path: string, body?: any) => {
+      if (!gatewayBase) throw new Error("Gateway not set.");
+      const resp = await fetch(`${gatewayBase}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : JSON.stringify({}),
+      });
+      const data = await safeJson(resp);
+      if (!resp.ok || data?.ok === false) {
+        throw new Error(data?.message || `HTTP ${resp.status}`);
       }
-    } catch {}
-    navigation.navigate("ModeSelect");
-  };
+      return data;
+    },
+    [gatewayBase]
+  );
 
-  const goHome = () => {
-    navigation.navigate("ModeSelect");
-  };
+  const apiGet = useCallback(
+    async (path: string) => {
+      if (!gatewayBase) throw new Error("Gateway not set.");
+      const resp = await fetch(`${gatewayBase}${path}`, { method: "GET" });
+      const data = await safeJson(resp);
+      if (!resp.ok || data?.ok === false) {
+        throw new Error(data?.message || `HTTP ${resp.status}`);
+      }
+      return data;
+    },
+    [gatewayBase]
+  );
 
-  const stopAll = async () => {
-    setEnabled(false);
+  const refreshCameraStatus = useCallback(async () => {
+    if (!gatewayBase) return;
+    setCameraLoading(true);
     try {
-      if (!base) return;
-      await fetch(`${base}/api/robot/stop`, { method: "POST" }).catch(() => {});
-      await fetch(`${base}/api/robot/disable`, { method: "POST" }).catch(() => {});
-    } catch {}
-  };
-
-  const toggleEnable = async () => {
-    if (!base) return;
-
-    try {
-      const url = enabled ? `${base}/api/robot/disable` : `${base}/api/robot/enable`;
-      const resp = await fetch(url, { method: "POST" });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      setEnabled((v) => !v);
-    } catch {
-      Alert.alert("Action failed", "Could not toggle robot state. Check Gateway/Robot connection.");
+      const data = await apiGet("/api/camera/realsense/status");
+      const cam = data?.camera || {};
+      setCameraStarted(!!cam.started);
+      setCameraLastError(cam.last_error || "");
+    } catch (e: any) {
+      setCameraStarted(false);
+      setCameraLastError(e?.message || "Camera status failed.");
+    } finally {
+      setCameraLoading(false);
     }
-  };
+  }, [apiGet, gatewayBase]);
 
-  const speedChange = async (delta: number) => {
-    const next = clamp(Math.round((speedPct + delta) / 5) * 5, 0, 100);
-    setSpeedPct(next);
-
-    // send speed to gateway (optional)
+  const refreshGripperStatus = useCallback(async () => {
+    if (!gatewayBase) return;
+    setGripperLoading(true);
     try {
-      if (!base) return;
-      await fetch(`${base}/api/robot/speed`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ speed_pct: next }),
-      }).catch(() => {});
-    } catch {}
-  };
+      const data = await apiGet("/api/gripper/status");
+      const g = data?.gripper || {};
+      const pct =
+        typeof g.gripper_pct === "number"
+          ? g.gripper_pct
+          : typeof g.pct === "number"
+            ? g.pct
+            : typeof (live as any)?.status?.gripper_pct === "number"
+              ? (live as any).status.gripper_pct
+              : 0;
+      setGripperPct(clamp(Math.round(pct), 0, 100));
+    } catch {
+      // silent
+    } finally {
+      setGripperLoading(false);
+    }
+  }, [apiGet, gatewayBase, live]);
 
-  const sendGripper = async (dir: "open" | "close") => {
-    try {
-      if (!base) return;
-      // example: 5% change
-      const next = clamp(gripperPct + (dir === "open" ? 5 : -5), 0, 100);
-      setGripperPct(next);
+  useFocusEffect(
+    useCallback(() => {
+      refreshCameraStatus();
+      refreshGripperStatus();
+    }, [refreshCameraStatus, refreshGripperStatus])
+  );
 
-      await fetch(`${base}/api/robot/gripper`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: dir, pct: next }),
-      }).catch(() => {});
-    } catch {}
-  };
-
-  const startHoldJog = async (axis: string, sign: 1 | -1) => {
-    try {
-      if (!base) return;
-      // Cancel any inflight
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
-      const c = new AbortController();
-      abortRef.current = c;
-
-      await fetch(`${base}/api/robot/jog/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: c.signal,
-        body: JSON.stringify({
-          frame, // "Base" | "Tool"
-          mode,  // "XYZ" | "RXYZ"
-          axis,  // "x","y","z" or "rx","ry","rz"
-          sign,  // 1 or -1
-          speed_pct: speedPct,
-        }),
-      }).catch(() => {});
-    } catch {}
-  };
-
-  const endHoldJog = async () => {
-    try {
-      if (!base) return;
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
-      await fetch(`${base}/api/robot/jog/stop`, { method: "POST" }).catch(() => {});
-    } catch {}
-  };
-
-  // Boot: load gateway/robot from storage to avoid “empty” crashes
-  useEffect(() => {
-    (async () => {
+  // --- Main actions ---
+  const pushFrame = useCallback(
+    async (f: JogFrame) => {
+      setFrame(f);
+      // Backend expects base|tool (string)
       try {
-        const [gw, rb] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.gateway),
-          AsyncStorage.getItem(STORAGE_KEYS.robot),
-        ]);
-        const gwv = (route?.params?.gateway || gw || "").trim();
-        const rbv = (route?.params?.robot || rb || "").trim();
-        setGatewayUrl(gwv);
-        setRobotIp(rbv);
-      } catch {}
-    })();
-  }, [route?.params?.gateway, route?.params?.robot]);
-
-  // Optional: quick status pings for dots
-  useEffect(() => {
-    let alive = true;
-    const run = async () => {
-      if (!base) {
-        if (!alive) return;
-        setGatewayStatus("error");
-        setRobotStatus("idle");
-        return;
-      }
-
-      try {
-        setGatewayStatus("connecting");
-        const r = await fetch(`${base}/api/status`);
-        if (!r.ok) throw new Error("gw");
-        if (!alive) return;
-        setGatewayStatus("connected");
+        await apiPost("/api/frame", { frame: f.toLowerCase() });
       } catch {
-        if (!alive) return;
-        setGatewayStatus("error");
-        return;
+        // silent
       }
+    },
+    [apiPost]
+  );
 
-      // Robot status via gateway (optional)
+  const sendJogDelta = useCallback(
+    async (payload: any) => {
       try {
-        setRobotStatus("connecting");
-        const r = await fetch(`${base}/api/robot/status`);
-        if (!r.ok) throw new Error("rb");
-        const data = await r.json().catch(() => ({}));
-        if (!alive) return;
-        setRobotStatus(data?.connected ? "connected" : "idle");
-        setEnabled(!!data?.enabled);
+        await apiPost("/api/jog", payload);
       } catch {
-        if (!alive) return;
-        setRobotStatus("idle");
+        // silent (429 throttling etc.)
       }
-    };
+    },
+    [apiPost]
+  );
 
-    run();
-    const t = setInterval(run, 3500);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [base]);
+  const startHoldJog = useCallback(
+    (axis: string, dir: 1 | -1) => {
+      if (!gatewayBase || !robotConnected) return;
+
+      jogAbort.current = false;
+      const stepPos = 5; // mm
+      const stepRot = 3; // deg
+
+      const tick = async () => {
+        if (jogAbort.current) return;
+
+        if (mode === "XYZ") {
+          const dx = axis === "x" ? stepPos * dir : 0;
+          const dy = axis === "y" ? stepPos * dir : 0;
+          const dz = axis === "z" ? stepPos * dir : 0;
+          await sendJogDelta({ dx, dy, dz, droll: 0, dpitch: 0, dyaw: 0 });
+        } else {
+          const droll = axis === "rx" ? stepRot * dir : 0;
+          const dpitch = axis === "ry" ? stepRot * dir : 0;
+          const dyaw = axis === "rz" ? stepRot * dir : 0;
+          await sendJogDelta({ dx: 0, dy: 0, dz: 0, droll, dpitch, dyaw });
+        }
+
+        jogTimer.current = setTimeout(tick, 120);
+      };
+
+      tick();
+    },
+    [gatewayBase, robotConnected, mode, sendJogDelta]
+  );
+
+  const endHoldJog = useCallback(() => {
+    jogAbort.current = true;
+    if (jogTimer.current) clearTimeout(jogTimer.current);
+    jogTimer.current = null;
+  }, []);
+
+  const sendGripper = useCallback(
+    async (action: "open" | "close") => {
+      try {
+        await apiPost("/api/gripper", { action });
+        await refreshGripperStatus();
+      } catch (e: any) {
+        Alert.alert("Gripper failed", e?.message || "Gripper action failed.");
+      }
+    },
+    [apiPost, refreshGripperStatus]
+  );
+
+  const onStop = useCallback(async () => {
+    try {
+      await apiPost("/api/stop");
+    } catch (e: any) {
+      Alert.alert("STOP failed", e?.message || "Stop failed.");
+    }
+  }, [apiPost]);
+
+  // --- Settings actions ---
+  const onEnableDisable = useCallback(async () => {
+    try {
+      if (!gatewayBase) return Alert.alert("Gateway missing", "Please set Gateway in Connection Hub.");
+      if (!robotConnected) return Alert.alert("Robot not connected", "Connect robot from Connection Hub first.");
+      if (enabled) await apiPost("/api/disable");
+      else await apiPost("/api/enable");
+    } catch (e: any) {
+      Alert.alert("Action failed", e?.message || "Enable/Disable failed.");
+    }
+  }, [apiPost, enabled, gatewayBase, robotConnected]);
+
+  const onClearSafety = useCallback(async () => {
+    try {
+      await apiPost("/api/safety/clear");
+    } catch (e: any) {
+      Alert.alert("Clear Safety failed", e?.message || "Clear Safety failed.");
+    }
+  }, [apiPost]);
+
+  const onCameraStart = useCallback(async () => {
+    if (!gatewayBase) return;
+    setCameraLoading(true);
+    try {
+      await apiPost("/api/camera/realsense/start");
+      await refreshCameraStatus();
+    } catch (e: any) {
+      Alert.alert("Camera start failed", e?.message || "Camera start failed.");
+    } finally {
+      setCameraLoading(false);
+    }
+  }, [apiPost, gatewayBase, refreshCameraStatus]);
+
+  const onCameraStop = useCallback(async () => {
+    if (!gatewayBase) return;
+    setCameraLoading(true);
+    try {
+      await apiPost("/api/camera/realsense/stop");
+      await refreshCameraStatus();
+    } catch (e: any) {
+      Alert.alert("Camera stop failed", e?.message || "Camera stop failed.");
+    } finally {
+      setCameraLoading(false);
+    }
+  }, [apiPost, gatewayBase, refreshCameraStatus]);
+
+  const pushSpeed = useCallback(
+    async (nextPct: number) => {
+      const v = clamp(Math.round(nextPct), 1, 100);
+      setSpeedPct(v);
+      try {
+        await apiPost("/api/speed", { speed_pct: v });
+      } catch {
+        // silent
+      }
+    },
+    [apiPost]
+  );
+
+  // --- Navigation helpers ---
+  const goConnectionHub = useCallback(() => {
+    navigation.navigate("ConnectionHub");
+  }, [navigation]);
+
+  // --- Layout ---
+  const leftW = useMemo(() => clamp(Math.round(width * 0.28), 240, 310), [width]);
+  const rightW = useMemo(() => clamp(Math.round(width * 0.28), 260, 340), [width]);
 
   if (!isLandscape) {
     return (
@@ -370,103 +484,101 @@ export default function ManualControlScreen({ navigation, route }: any) {
     );
   }
 
-  const Dot = ({ status }: { status: DotStatus }) => (
-    <View style={[styles.dot, dotStyleFor(status, styles)]} />
-  );
-
-  const centerLabel = mode === "XYZ" ? "XYZ" : "RXYZ";
+  const canControl = !!gatewayBase && robotConnected;
 
   return (
     <ImageBackground source={require("../../assets/splash.jpg")} style={styles.bg} resizeMode="cover">
       <View style={styles.dim} />
-
       <SafeAreaView style={styles.safe}>
         {/* Top bar */}
         <View style={styles.topBar}>
           <View style={styles.topLeft}>
-            <View style={styles.pill}>
-              <Dot status={robotStatus} />
-              <Text style={styles.pillText}>{enabled ? "Enabled" : "Disabled"}</Text>
-            </View>
+            <IconBtn icon="menu" label="Status" onPress={() => setLeftOpen(true)} />
+          </View>
+          <View style={styles.topLeft}>
 
-            <Pressable onPress={disconnect} style={({ pressed }) => [styles.topBtn, pressed ? { opacity: 0.92 } : null]}>
-              <Text style={styles.topBtnText}>Disconnect</Text>
-            </Pressable>
+            <Row>
+              <PillToggle label="Base" active={frame === "Base"} onPress={() => pushFrame("Base")} />
+              <PillToggle label="Tool" active={frame === "Tool"} onPress={() => pushFrame("Tool")} />
+            </Row>
+
           </View>
 
-          <View style={styles.infoBar}>
-            <Text style={styles.infoLabel}>Info</Text>
-            <Text style={styles.infoText}>X-mm  Y-mm  Z-mm</Text>
+          {/* Minimal status dots line (compact) */}
+          <View style={styles.topCenterCompact}>
+            <View style={styles.dotLine}>
+              <View style={[styles.dot, dotStyle(gwDot)]} />
+              <Text style={styles.dotText}>Gateway</Text>
+            </View>
+            <View style={styles.dotLine}>
+              <View style={[styles.dot, dotStyle(rbDot)]} />
+              <Text style={styles.dotText}>Robot</Text>
+            </View>
+            <View style={styles.dotLine}>
+              <View style={[styles.dot, dotStyle(camDot)]} />
+              <Text style={styles.dotText}>Camera</Text>
+            </View>
+            <View style={styles.dotLine}>
+              <View style={[styles.dot, dotStyle(aiDot)]} />
+              <Text style={styles.dotText}>AI Server</Text>
+            </View>
           </View>
 
           <View style={styles.topRight}>
-            <Pressable
-              onPress={toggleEnable}
-              style={({ pressed }) => [
-                styles.topBtn,
-                enabled ? styles.topBtnMuted : styles.topBtnPrimary,
-                pressed ? { opacity: 0.92 } : null,
-              ]}
-            >
-              <Text style={styles.topBtnText}>{enabled ? "Disable" : "Enable"}</Text>
-            </Pressable>
+            <Row>
+              <PillToggle label="XYZ" active={mode === "XYZ"} onPress={() => setMode("XYZ")} />
+              <PillToggle label="RXYZ" active={mode === "RXYZ"} onPress={() => setMode("RXYZ")} />
+            </Row>
+          </View>
 
-            <Pressable onPress={goHome} style={({ pressed }) => [styles.topBtn, pressed ? { opacity: 0.92 } : null]}>
-              <Text style={styles.topBtnText}>Home</Text>
-            </Pressable>
+          <View style={styles.topRight}>
+            <IconBtn icon="cog-outline" label="Ayarlar" onPress={() => setRightOpen(true)} />
           </View>
         </View>
 
+        {/* Body (3 blocks) */}
         <View style={styles.body}>
-          {/* Left panel */}
+          {/* LEFT BLOCK */}
           <View style={[styles.panel, { width: leftW }]}>
-            <Dropdown
-              label="Jog Frame"
-              value={frame}
-              options={[
-                { key: "Base", title: "Base", subtitle: "Robot base coordinates" },
-                { key: "Tool", title: "Tool", subtitle: "End-effector frame" },
-              ]}
-              onChange={(k) => setFrame(k as JogFrame)}
-            />
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 14 }}>
 
-            <View style={styles.panelCard}>
-              <Text style={styles.cardTitle}>Z / Gripper</Text>
 
-              {/* Gripper bar */}
-              <View style={styles.barWrap}>
-                <Text style={styles.barText}>Gripper: {gripperPct}%</Text>
-                <View style={styles.barTrack}>
-                  <View style={[styles.barFill, { width: pctToBarWidth(gripperPct) }]} />
-                </View>
-              </View>
+              <BarCard
+                title="Gripper"
+                rightText={gripperLoading ? "Loading…" : `${gripperPct}/100`}
+                valuePct={gripperPct}
+              />
 
-              {/* Cross: Z vertical, Gripper horizontal */}
-              <View style={styles.cross}>
+
+              <View style={{ marginTop: 12,  alignItems: "center"}}>
                 <HoldBtn
-                  label="Z+"
-                  onHoldStart={() => startHoldJog("z", +1)}
+                  label={mode === "XYZ" ? "Z+" : "RZ+"}
+                  disabled={!canControl}
+                  onHoldStart={() => startHoldJog(mode === "XYZ" ? "z" : "rz", +1)}
                   onHoldEnd={endHoldJog}
                 />
 
-                <View style={styles.crossMidRow}>
-                  <HoldBtn label="Grip-" onPress={() => sendGripper("close")} />
+                <View style={styles.jogMidRow}>
+                  <HoldBtn label="Grip-" disabled={!canControl} onPress={() => sendGripper("close")} />
                   <View style={styles.crossCenter}>
                     <Text style={styles.crossCenterText}>{frame}</Text>
                   </View>
-                  <HoldBtn label="Grip+" onPress={() => sendGripper("open")} />
+                  <HoldBtn label="Grip+" disabled={!canControl} onPress={() => sendGripper("open")} />
                 </View>
 
                 <HoldBtn
-                  label="Z-"
-                  onHoldStart={() => startHoldJog("z", -1)}
+                  label={mode === "XYZ" ? "Z-" : "RZ-"}
+                  disabled={!canControl}
+                  onHoldStart={() => startHoldJog(mode === "XYZ" ? "z": "rz", -1)}
                   onHoldEnd={endHoldJog}
                 />
               </View>
-            </View>
+
+
+            </ScrollView>
           </View>
 
-          {/* Center: Camera + STOP */}
+          {/* CENTER BLOCK: Camera + STOP */}
           <View style={styles.center}>
             <View style={styles.cameraCard}>
               {!cameraUrl ? (
@@ -475,16 +587,12 @@ export default function ManualControlScreen({ navigation, route }: any) {
                 </View>
               ) : (
                 <View style={styles.cameraBox}>
-                  {/* 4/3 aspect */}
+                  {/* 4/3 aspect area */}
                   <View style={styles.cameraAspect}>
                     <WebView
-                      source={{ uri: cameraUrl }}
-                      style={styles.web}
-                      javaScriptEnabled
-                      domStorageEnabled
-                      scalesPageToFit
-                      allowsInlineMediaPlayback
-                      mediaPlaybackRequiresUserAction={false}
+                      originWhitelist={["*"]}
+                      javaScriptEnabled={false}
+                      domStorageEnabled={false}
                       startInLoadingState
                       renderLoading={() => (
                         <View style={styles.webLoading}>
@@ -492,111 +600,261 @@ export default function ManualControlScreen({ navigation, route }: any) {
                           <Text style={styles.webLoadingText}>Loading camera…</Text>
                         </View>
                       )}
+                      // MJPEG: render via <img>
+                      source={{
+                        html: `
+                          <html>
+                            <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+                            <body style="margin:0;background:#000;">
+                              <img src="${cameraUrl}" style="width:100%;height:100%;object-fit:contain;" />
+                            </body>
+                          </html>
+                        `,
+                      }}
+                      style={styles.web}
                     />
                   </View>
                 </View>
               )}
             </View>
 
-            <Pressable onPress={stopAll} style={({ pressed }) => [styles.stopBtn, pressed ? { opacity: 0.92 } : null]}>
+            <Pressable onPress={onStop} style={({ pressed }) => [styles.stopBtn, pressed ? { opacity: 0.92 } : null]}>
               <Text style={styles.stopText}>STOP</Text>
             </Pressable>
           </View>
 
-          {/* Right panel */}
+          {/* RIGHT BLOCK */}
           <View style={[styles.panel, { width: rightW }]}>
-            <Dropdown
-              label="Control Mode"
-              value={mode}
-              options={[
-                { key: "XYZ", title: "XYZ (Position)", subtitle: "Move X/Y axes" },
-                { key: "RXYZ", title: "RXYZ (Orientation)", subtitle: "Rotate RX/RY/RZ" },
-              ]}
-              onChange={(k) => setMode(k as ControlMode)}
-            />
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 14 }}>
 
-            {/* Speed (same bar style) */}
-            <View style={styles.panelCard}>
-              <Text style={styles.cardTitle}>Speed</Text>
 
-              <View style={styles.speedRow}>
-                <HoldBtn label="-" onPress={() => speedChange(-5)} />
-                <View style={styles.speedMid}>
-                  <Text style={styles.speedPct}>{speedPct}%</Text>
-                  <View style={styles.barTrack}>
-                    <View style={[styles.barFill, { width: pctToBarWidth(speedPct) }]} />
-                  </View>
-                  <Text style={styles.speedHint}>Adjust in steps of 5%</Text>
-                </View>
-                <HoldBtn label="+" onPress={() => speedChange(+5)} />
+
+              <BarCard
+                title="Speed"
+                rightText={`${speedPct}%`}
+                valuePct={speedPct}
+              />
+
+              <View style={{ flexDirection:"row", alignItems:"center", justifyContent:"space-around" }}>
+                <IconBtn icon="minus" label="Speed" onPress={() => pushSpeed(speedPct - 5)} />
+
+                <IconBtn icon="plus" label="Speed" onPress={() => pushSpeed(speedPct + 5)} />
+
               </View>
-            </View>
 
-            {/* Jog pad */}
-            <View style={styles.panelCard}>
-              <Text style={styles.cardTitle}>Jog</Text>
 
-              <View style={styles.jogPad}>
-                {/* Top */}
+              <View style={styles.jogTopRow}>
+
+
+                <HoldBtn
+                  label={mode === "XYZ" ? "X+" : "RX+"}
+                  disabled={!canControl}
+                  onHoldStart={() => startHoldJog(mode === "XYZ" ? "x" : "rx", +1)}
+                  onHoldEnd={endHoldJog}
+                />
+
+
+              </View>
+
+
+              <View style={styles.jogMidRow}>
                 <HoldBtn
                   label={mode === "XYZ" ? "Y+" : "RY+"}
+                  disabled={!canControl}
                   onHoldStart={() => startHoldJog(mode === "XYZ" ? "y" : "ry", +1)}
                   onHoldEnd={endHoldJog}
                 />
 
-                {/* Middle row */}
-                <View style={styles.jogMidRow}>
-                  <HoldBtn
-                    label={mode === "XYZ" ? "X-" : "RX-"}
-                    onHoldStart={() => startHoldJog(mode === "XYZ" ? "x" : "rx", -1)}
-                    onHoldEnd={endHoldJog}
-                  />
-
-                  <View style={styles.jogCenter}>
-                    <Text style={styles.jogCenterText}>{centerLabel}</Text>
-                  </View>
-
-                  <HoldBtn
-                    label={mode === "XYZ" ? "X+" : "RX+"}
-                    onHoldStart={() => startHoldJog(mode === "XYZ" ? "x" : "rx", +1)}
-                    onHoldEnd={endHoldJog}
-                  />
+                <View style={styles.jogCenter}>
+                  <Text style={styles.jogCenterText}>{mode}</Text>
                 </View>
 
-                {/* Bottom */}
                 <HoldBtn
                   label={mode === "XYZ" ? "Y-" : "RY-"}
+                  disabled={!canControl}
                   onHoldStart={() => startHoldJog(mode === "XYZ" ? "y" : "ry", -1)}
                   onHoldEnd={endHoldJog}
                 />
+              </View>
 
-                {/* Extra row for RZ if orientation */}
-                {mode === "RXYZ" && (
-                  <View style={styles.rzRow}>
-                    <HoldBtn label="RZ-" onHoldStart={() => startHoldJog("rz", -1)} onHoldEnd={endHoldJog} />
-                    <HoldBtn label="RZ+" onHoldStart={() => startHoldJog("rz", +1)} onHoldEnd={endHoldJog} />
-                  </View>
-                )}
+              <View style={styles.jogBottomRow}>
+                <HoldBtn
+                  label={mode === "XYZ" ? "X-" : "RX-"}
+                  disabled={!canControl}
+                  onHoldStart={() => startHoldJog(mode === "XYZ" ? "x" : "rx", -1)}
+                  onHoldEnd={endHoldJog}
+                />
               </View>
-            </View>
 
-            {/* Compact status dots (no “connections” panel) */}
-            <View style={styles.statusMini}>
-              <View style={styles.statusLine}>
-                <Dot status={gatewayStatus} />
-                <Text style={styles.statusText} numberOfLines={1}>
-                  Gateway
-                </Text>
-              </View>
-              <View style={styles.statusLine}>
-                <Dot status={robotStatus} />
-                <Text style={styles.statusText} numberOfLines={1}>
-                  Robot
-                </Text>
-              </View>
-            </View>
+
+
+
+
+            </ScrollView>
           </View>
         </View>
+
+        {/* LEFT DRAWER: Status */}
+        {leftOpen && (
+          <View style={styles.drawerOverlay}>
+            <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setLeftOpen(false)} />
+            <View style={[styles.drawer, { left: 12, width: clamp(Math.round(width * 0.20), 320, 560) }]}>
+              <View style={styles.drawerHeader}>
+                <Text style={styles.drawerTitle}>Status</Text>
+                <IconBtn icon="close" onPress={() => setLeftOpen(false)} />
+              </View>
+
+              <ScrollView contentContainerStyle={{ paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+                <View style={styles.drawerCard}>
+                  <View style={styles.drawerRow}>
+                    <View style={[styles.dot, dotStyle(gwDot)]} />
+                    <Text style={styles.drawerRowTitle}>Gateway</Text>
+                  </View>
+                  <Text style={styles.drawerRowSub} numberOfLines={2}>
+                    {gateway.value || "-"}
+                  </Text>
+                  <Text style={styles.drawerHint}>WS: {wsConnected ? "Connected" : "Disconnected"}</Text>
+                </View>
+
+                <View style={styles.drawerCard}>
+                  <View style={styles.drawerRow}>
+                    <View style={[styles.dot, dotStyle(rbDot)]} />
+                    <Text style={styles.drawerRowTitle}>Robot</Text>
+                  </View>
+                  <Text style={styles.drawerRowSub} numberOfLines={2}>
+                    {robot.value || "-"}
+                  </Text>
+                  <Text style={styles.drawerHint}>
+                    {robotConnected ? "Connected (via gateway)." : "Not connected."}
+                  </Text>
+                </View>
+
+                <View style={styles.drawerCard}>
+                  <View style={styles.drawerRow}>
+                    <View style={[styles.dot, dotStyle(camDot)]} />
+                    <Text style={styles.drawerRowTitle}>Camera</Text>
+                  </View>
+                  <Text style={styles.drawerRowSub}>{cameraStarted ? "Started" : "Stopped"}</Text>
+                  {!!cameraLastError && <Text style={styles.drawerHint}>{cameraLastError}</Text>}
+                </View>
+
+                <View style={styles.drawerCard}>
+                  <View style={styles.drawerRow}>
+                    <View style={[styles.dot, dotStyle(aiDot)]} />
+                    <Text style={styles.drawerRowTitle}>AI Server</Text>
+                  </View>
+                  <Text style={styles.drawerRowSub} numberOfLines={2}>
+                    {aiserver.value || "-"}
+                  </Text>
+                  {!!aiserver.message && <Text style={styles.drawerHint}>{aiserver.message}</Text>}
+                </View>
+
+                <Pressable
+                  onPress={() => {
+                    setLeftOpen(false);
+                    goConnectionHub();
+                  }}
+                  style={({ pressed }) => [styles.hubLink, pressed ? { opacity: 0.9 } : null]}
+                >
+                  <MaterialCommunityIcons name="link-variant" size={18} color="white" />
+                  <Text style={styles.hubLinkText}>Connection Hub’a git</Text>
+                </Pressable>
+
+                <Text style={styles.drawerTiny}>
+                  Not: Bağlantı adreslerini / IP’leri değiştirmek için Connection Hub ekranını kullan.
+                </Text>
+              </ScrollView>
+            </View>
+          </View>
+        )}
+
+        {/* RIGHT DRAWER: Settings */}
+        {rightOpen && (
+          <View style={styles.drawerOverlay}>
+            <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setRightOpen(false)} />
+            <View style={[styles.drawer, { right: 12, width: clamp(Math.round(width * 0.40), 320, 560) }]}>
+              <View style={styles.drawerHeader}>
+                <Text style={styles.drawerTitle}>Ayarlar</Text>
+                <IconBtn icon="close" onPress={() => setRightOpen(false)} />
+              </View>
+
+              <ScrollView contentContainerStyle={{ paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+                {/* Robot controls */}
+
+                <View style={styles.drawerCard}>
+                  <Text style={styles.drawerSectionTitle}>Telemetry</Text>
+
+                </View>
+                <View style={styles.drawerCard}>
+                  <Text style={styles.drawerSectionTitle}>Robot</Text>
+
+                  <View style={styles.drawerBtnRow}>
+                    <IconBtn
+                      icon={enabled ? "power" : "power"}
+                      label={enabled ? "Disable" : "Enable"}
+                      tone={enabled ? "ghost" : "primary"}
+                      onPress={onEnableDisable}
+                      disabled={!gatewayBase || !robotConnected}
+                    />
+                    <IconBtn
+                      icon="shield-alert-outline"
+                      label="Clear Safety"
+                      onPress={onClearSafety}
+                      disabled={!gatewayBase}
+                    />
+
+                    <Text>Home</Text>
+                  </View>
+
+              
+
+                  {(safetyLimit || safetyMsg) && (
+                    <Text style={styles.warnText}>
+                      {safetyLimit ? "Safety: limit hit." : "Safety warning."} {safetyMsg ? `(${safetyMsg})` : ""}
+                    </Text>
+                  )}
+                </View>
+
+
+
+                {/* Camera controls */}
+                <View style={styles.drawerCard}>
+                  <Text style={styles.drawerSectionTitle}>Camera</Text>
+                  <Text style={styles.drawerHint}>
+                    Status: {cameraLoading ? "Loading…" : cameraStarted ? "Started" : "Stopped"}
+                    {cameraLastError ? ` • ${cameraLastError}` : ""}
+                  </Text>
+
+                  <View style={styles.drawerBtnRow}>
+                    <IconBtn
+                      icon="play-outline"
+                      label="Start"
+                      tone="primary"
+                      onPress={onCameraStart}
+                      disabled={!gatewayBase || cameraLoading}
+                    />
+                    <IconBtn
+                      icon="stop"
+                      label="Stop"
+                      tone="danger"
+                      onPress={onCameraStop}
+                      disabled={!gatewayBase || cameraLoading}
+                    />
+                    {/* ✅ FIX: no "camera-refresh" icon */}
+                    <IconBtn
+                      icon="refresh"
+                      label="Status"
+                      onPress={refreshCameraStatus}
+                      disabled={!gatewayBase || cameraLoading}
+                    />
+                  </View>
+                </View>
+
+
+              </ScrollView>
+            </View>
+          </View>
+        )}
       </SafeAreaView>
     </ImageBackground>
   );
@@ -604,71 +862,63 @@ export default function ManualControlScreen({ navigation, route }: any) {
 
 const styles = StyleSheet.create({
   bg: { flex: 1 },
-  dim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(8, 12, 22, 0.72)" },
+  dim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(8, 12, 22, 0.74)" },
   safe: { flex: 1 },
 
   topBar: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    gap: 12,
-  },
-  topLeft: { flexDirection: "row", gap: 10, alignItems: "center", width: 260 },
-  topRight: { flexDirection: "row", gap: 10, alignItems: "center", width: 260, justifyContent: "flex-end" },
-
-  pill: {
-    flexDirection: "row",
-    gap: 8,
-    alignItems: "center",
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(0,0,0,0.18)",
+    paddingTop: 0,
+    gap: 0,
   },
-  pillText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 12 },
+  topLeft: { flexDirection: "row", alignItems: "center", gap: 10, width: 180 },
+  topRight: { width: 180, alignItems: "flex-end" },
 
-  topBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(0,0,0,0.18)",
-  },
-  topBtnPrimary: {
-    backgroundColor: "rgba(37, 99, 235, 0.92)",
-    borderColor: "rgba(37, 99, 235, 0.65)",
-  },
-  topBtnMuted: {
-    backgroundColor: "rgba(0,0,0,0.18)",
-  },
-  topBtnText: { color: "white", fontWeight: "900", fontSize: 12 },
-
-  infoBar: {
+  topCenterCompact: {
     flex: 1,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 18,
+    height: 42,
+    borderRadius: 999,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
     backgroundColor: "rgba(0,0,0,0.18)",
+    padding: 10,
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "center",
     gap: 14,
   },
-  infoLabel: { color: "rgba(255,255,255,0.65)", fontWeight: "900", fontSize: 12 },
-  infoText: { color: "rgba(255,255,255,0.90)", fontWeight: "900", fontSize: 12 },
+  dotLine: { flexDirection: "row", alignItems: "center", gap: 6 },
+  dotText: { color: "rgba(255,255,255,0.75)", fontWeight: "900", fontSize: 11 },
+
+  iconBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    backgroundColor: "rgba(0,0,0,0.18)",
+  },
+  iconBtnPrimary: {
+    backgroundColor: "rgba(37, 99, 235, 0.92)",
+    borderColor: "rgba(37, 99, 235, 0.65)",
+  },
+  iconBtnDanger: {
+    backgroundColor: "rgba(239, 68, 68, 0.92)",
+    borderColor: "rgba(239, 68, 68, 0.65)",
+  },
+  iconBtnText: { color: "white", fontWeight: "900", fontSize: 12 },
 
   body: {
     flex: 1,
     flexDirection: "row",
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingTop: 10,
     paddingBottom: 12,
-    gap: 12,
+    gap: 10,
   },
 
   panel: {
@@ -677,19 +927,10 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(18, 27, 47, 0.62)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
-    gap: 12,
   },
 
-  panelCard: {
-    borderRadius: 18,
-    padding: 12,
-    backgroundColor: "rgba(0,0,0,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  cardTitle: { color: "rgba(255,255,255,0.88)", fontWeight: "900", fontSize: 12, marginBottom: 10 },
+  center: { flex: 1, gap: 10 },
 
-  center: { flex: 1, gap: 12 },
   cameraCard: {
     flex: 1,
     borderRadius: 22,
@@ -704,7 +945,7 @@ const styles = StyleSheet.create({
   cameraBox: { flex: 1, padding: 12 },
   cameraAspect: {
     width: "100%",
-    aspectRatio: 4 / 3,
+    height: "100%",
     borderRadius: 18,
     overflow: "hidden",
     borderWidth: 1,
@@ -717,7 +958,7 @@ const styles = StyleSheet.create({
   webLoadingText: { color: "rgba(255,255,255,0.55)", fontWeight: "800", fontSize: 12 },
 
   stopBtn: {
-    height: 72,
+    height: 40,
     borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
@@ -727,118 +968,46 @@ const styles = StyleSheet.create({
   },
   stopText: { color: "white", fontWeight: "900", fontSize: 18, letterSpacing: 1 },
 
-  // Dropdown
-  dd: {
-    borderRadius: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    backgroundColor: "rgba(0,0,0,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  ddText: { color: "rgba(255,255,255,0.90)", fontWeight: "900", fontSize: 12 },
-  ddChevron: { color: "rgba(255,255,255,0.55)", fontWeight: "900" },
+  sectionTitle: { color: "rgba(255,255,255,0.88)", fontWeight: "900", fontSize: 12, marginBottom: 10 },
+  row: { flexDirection: "row", gap: 10, alignItems: "center" },
+  jogTopRow: { flexDirection: "row", gap: 10, justifyContent: "center", alignItems: "center" },
 
-  modalOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.55)",
+  pillToggle: {
+    flex: 1,
+    borderRadius: 16,
+    paddingVertical: 12,
     alignItems: "center",
     justifyContent: "center",
-    padding: 18,
-    zIndex: 1000,
+    backgroundColor: "rgba(0,0,0,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
-  modalCard: {
-    width: 520,
-    maxWidth: "100%",
-    borderRadius: 22,
-    padding: 16,
-    backgroundColor: "rgba(18, 27, 47, 0.92)",
+  pillToggleActive: {
+    backgroundColor: "rgba(37, 99, 235, 0.22)",
+    borderColor: "rgba(37, 99, 235, 0.65)",
+  },
+  pillToggleText: { color: "white", fontWeight: "900", fontSize: 12 },
+
+  divider: { marginVertical: 14, height: 1, backgroundColor: "rgba(255,255,255,0.08)" },
+
+  holdBtn: {
+    minWidth: 10,
+    maxWidth: 80,
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
   },
-  modalTitle: { color: "white", fontWeight: "900", fontSize: 16, marginBottom: 12 },
-  modalItem: {
-    borderRadius: 18,
-    padding: 14,
-    backgroundColor: "rgba(0,0,0,0.18)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  modalItemActive: {
-    borderColor: "rgba(37, 99, 235, 0.70)",
-    backgroundColor: "rgba(37, 99, 235, 0.14)",
-  },
-  modalItemTitle: { color: "white", fontWeight: "900", fontSize: 14 },
-  modalItemSub: { color: "rgba(255,255,255,0.65)", marginTop: 4, fontSize: 12 },
-  modalClose: {
-    marginTop: 12,
-    borderRadius: 18,
-    paddingVertical: 12,
-    alignItems: "center",
-    backgroundColor: "rgba(255,255,255,0.10)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  modalCloseText: { color: "rgba(255,255,255,0.85)", fontWeight: "900" },
+  holdBtnText: { color: "white", fontWeight: "900", fontSize: 13 },
 
-  // Buttons
-  btn: {
-    minWidth: 72,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.10)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  btnPrimary: {
-    minWidth: 72,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(37, 99, 235, 0.92)",
-    borderWidth: 1,
-    borderColor: "rgba(37, 99, 235, 0.65)",
-  },
-  btnDanger: {
-    minWidth: 72,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(239, 68, 68, 0.92)",
-    borderWidth: 1,
-    borderColor: "rgba(239, 68, 68, 0.60)",
-  },
-  btnText: { color: "white", fontWeight: "900", fontSize: 13 },
-
-  // Bars (Gripper/Speed)
-  barWrap: { gap: 8 },
-  barText: { color: "rgba(255,255,255,0.75)", fontWeight: "900", fontSize: 12, textAlign: "center" },
-  barTrack: {
-    height: 8,
-    borderRadius: 99,
-    backgroundColor: "rgba(255,255,255,0.10)",
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  barFill: { height: "100%", backgroundColor: "rgba(37, 99, 235, 0.95)" },
-
-  // Cross
-  cross: { marginTop: 10, gap: 10, alignItems: "center" },
-  crossMidRow: { flexDirection: "row", gap: 10, alignItems: "center", justifyContent: "center" },
+  jogMidRow: { flexDirection: "row", gap: 10, alignItems: "center", justifyContent: "center", marginVertical: 10 },
   crossCenter: {
-    width: 60,
-    height: 50,
+    width: 62,
+    height: 46,
     borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
@@ -846,17 +1015,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
   },
-  crossCenterText: { color: "rgba(255,255,255,0.80)", fontWeight: "900", fontSize: 12 },
+  jogBottomRow: {
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  crossCenterText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 12 },
 
-  // Speed
-  speedRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  speedMid: { flex: 1, gap: 8, alignItems: "center" },
-  speedPct: { color: "white", fontWeight: "900", fontSize: 16 },
-  speedHint: { color: "rgba(255,255,255,0.45)", fontWeight: "800", fontSize: 11 },
-
-  // Jog pad
-  jogPad: { gap: 10, alignItems: "center" },
-  jogMidRow: { flexDirection: "row", gap: 10, alignItems: "center" },
   jogCenter: {
     width: 78,
     height: 56,
@@ -868,31 +1034,139 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.10)",
   },
   jogCenterText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 14 },
-  rzRow: { flexDirection: "row", gap: 10, marginTop: 6 },
 
-  // Dots
+  rzRow: { flexDirection: "row", gap: 10, marginTop: 10 },
+
+  note: { color: "rgba(255,255,255,0.50)", fontWeight: "800", fontSize: 11, textAlign: "center" },
+
+  // dots
   dot: { width: 10, height: 10, borderRadius: 99 },
   dotGreen: { backgroundColor: "rgba(34, 197, 94, 1)" },
   dotBlue: { backgroundColor: "rgba(59, 130, 246, 1)" },
   dotRed: { backgroundColor: "rgba(239, 68, 68, 1)" },
   dotGray: { backgroundColor: "rgba(148, 163, 184, 1)" },
 
-  statusMini: {
-    marginTop: -2,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingHorizontal: 2,
+  // Bar cards
+  barCard: {
+    borderRadius: 18,
+    padding: 12,
+    backgroundColor: "rgba(0,0,0,0.18)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
-  statusLine: { flexDirection: "row", gap: 8, alignItems: "center" },
-  statusText: { color: "rgba(255,255,255,0.60)", fontWeight: "900", fontSize: 11 },
+  barCardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline" },
+  barCardTitle: { color: "rgba(255,255,255,0.90)", fontWeight: "900", fontSize: 12 },
+  barCardSub: { color: "rgba(255,255,255,0.55)", fontWeight: "900", fontSize: 11 },
 
-  rotateWrap: {
-    flex: 1,
-    backgroundColor: "#0B1220",
+  barTrack: {
+    marginTop: 10,
+    height: 10,
+    borderRadius: 99,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  barFill: { height: "100%", backgroundColor: "rgba(37, 99, 235, 0.95)" },
+
+  // Drawers
+  drawerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    zIndex: 2000,
+  },
+  drawer: {
+    position: "absolute",
+    top: 26,
+    bottom: 16,
+    borderRadius: 22,
+    padding: 12,
+    backgroundColor: "rgba(18, 27, 47, 0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  drawerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingBottom: 10,
+  },
+  drawerTitle: { color: "white", fontWeight: "900", fontSize: 16 },
+
+  drawerCard: {
+    borderRadius: 18,
+    padding: 12,
+    backgroundColor: "rgba(0,0,0,0.18)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    marginBottom: 10,
+  },
+  drawerRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  drawerRowTitle: { color: "rgba(255,255,255,0.90)", fontWeight: "900", fontSize: 13 },
+  drawerRowSub: { color: "rgba(255,255,255,0.70)", fontWeight: "800", marginTop: 8, fontSize: 12 },
+  drawerHint: { color: "rgba(255,255,255,0.55)", fontWeight: "800", marginTop: 6, fontSize: 11 },
+
+  drawerSectionTitle: { color: "rgba(255,255,255,0.92)", fontWeight: "900", fontSize: 13, marginBottom: 6 },
+  drawerBtnRow: { flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap", justifyContent:"space-evenly" },
+
+  drawerTiny: { color: "rgba(255,255,255,0.55)", fontWeight: "800", marginTop: 8, fontSize: 11 },
+  drawerTinyCenter: { color: "rgba(255,255,255,0.55)", fontWeight: "900", marginTop: 10, fontSize: 11, textAlign: "center" },
+
+  warnText: { marginTop: 10, color: "rgba(239,68,68,0.92)", fontWeight: "900", fontSize: 11 },
+
+  hubLink: {
+    marginTop: 6,
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: "rgba(37, 99, 235, 0.22)",
+    borderWidth: 1,
+    borderColor: "rgba(37, 99, 235, 0.65)",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  hubLinkText: { color: "white", fontWeight: "900" },
+
+  // Slider
+  sliderWrap: { width: "100%" },
+  sliderTrack: {
+    width: "100%",
+    height: 14,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    overflow: "hidden",
+    justifyContent: "center",
+  },
+  sliderFill: { height: "100%", backgroundColor: "rgba(37, 99, 235, 0.95)" },
+  sliderKnob: {
+    position: "absolute",
+    top: -5,
+    width: 22,
+    height: 22,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.92)",
+    marginLeft: -11,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.18)",
+  },
+
+  presetRow: { flexDirection: "row", gap: 8, marginTop: 12, flexWrap: "wrap" },
+  preset: {
+    minWidth: 54,
+    height: 38,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    padding: 22,
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
+  presetText: { color: "white", fontWeight: "900" },
+
+  rotateWrap: { flex: 1, backgroundColor: "#0B1220", alignItems: "center", justifyContent: "center", padding: 22 },
   rotateTitle: { color: "white", fontSize: 20, fontWeight: "900" },
   rotateSub: { color: "rgba(255,255,255,0.65)", marginTop: 10, textAlign: "center", maxWidth: 420 },
 });

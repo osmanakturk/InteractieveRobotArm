@@ -4,13 +4,10 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import SplashScreen from './src/screens/SplashScreen';
 import ConnectionHubScreen from './src/screens/ConnectionHubScreen';
-import RobotConnectionScreen from './src/screens/RobotConnectionScreen';
-import SystemConnectionScreen from './src/screens/SystemConnectionScreen';
 import ModeSelectionScreen from './src/screens/ModeSelectionScreen';
 import ManualControlScreen from "./src/screens/ManualControlScreen";
 import PickPlaceScreen from "./src/screens/PickPlaceScreen";
 import VoiceControlScreen from "./src/screens/VoiceControlScreen";
-import ServerPCConnectionScreen from "./src/screens/ServerPCConnectionScreen";
 import { ConnectionProvider } from './src/connection/ConnectionContext';
 import TestScreen from "./src/screens/TestScreen";
 
@@ -33,9 +30,7 @@ export default function App() {
         <Stack.Screen name="PickPlace" component={PickPlaceScreen} />
         <Stack.Screen name="Voice" component={VoiceControlScreen} />
 
-        <Stack.Screen name="SystemConnect" component={SystemConnectionScreen} />
-        <Stack.Screen name="RobotConnect" component={RobotConnectionScreen} />
-        <Stack.Screen name="ServerPCConnect" component={ServerPCConnectionScreen} />
+
       </Stack.Navigator>
     </NavigationContainer>
     </ConnectionProvider>
