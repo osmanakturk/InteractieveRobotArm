@@ -53,19 +53,21 @@ function dotStyle(status: DotStatus) {
   return styles.dotGray;
 }
 
-/** Small icon button */
+
 function IconBtn({
   icon,
   label,
   onPress,
   tone = "ghost",
   disabled,
+  size = "md",
 }: {
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   label?: string;
   onPress: () => void;
   tone?: "ghost" | "primary" | "danger";
   disabled?: boolean;
+  size?: "sm" | "md";
 }) {
   return (
     <Pressable
@@ -73,13 +75,14 @@ function IconBtn({
       onPress={onPress}
       style={({ pressed }) => [
         styles.iconBtn,
+        size === "sm" ? styles.iconBtnSm : null,
         tone === "primary" ? styles.iconBtnPrimary : tone === "danger" ? styles.iconBtnDanger : null,
         disabled ? { opacity: 0.45 } : null,
         pressed && !disabled ? { opacity: 0.9 } : null,
       ]}
     >
-      <MaterialCommunityIcons name={icon} size={18} color="white" />
-      {!!label && <Text style={styles.iconBtnText}>{label}</Text>}
+      <MaterialCommunityIcons name={icon} size={size === "sm" ? 16 : 18} color="white" />
+      {!!label && <Text style={[styles.iconBtnText, size === "sm" ? styles.iconBtnTextSm : null]}>{label}</Text>}
     </Pressable>
   );
 }
@@ -183,7 +186,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
   );
 
   // MJPEG stream
-  const cameraUrl = useMemo(() => (gatewayBase ? `${gatewayBase}/api/camera/realsense` : ""), [gatewayBase]);
+  const realsenseMjpegUrl = useMemo(() => (gatewayBase ? `${gatewayBase}/api/cameras/realsense/stream/mjpeg` : ""), [gatewayBase]);
 
   // UI state
   const [frame, setFrame] = useState<JogFrame>("Tool");
@@ -213,9 +216,9 @@ export default function ManualControlScreen({ navigation, route }: any) {
 
   // Dots
   const gwDot: DotStatus = wsConnected ? "connected" : gatewayBase ? "error" : "idle";
-  const rbDot: DotStatus = robotConnected ? "connected" : robot.value.trim() ? "idle" : "idle";
-  const aiDot: DotStatus =
-    aiserver.status === "connected" ? "connected" : aiserver.status === "error" ? "error" : "idle";
+  //const rbDot: DotStatus = robotConnected ? "connected" : robot.value.trim() ? "idle" : "idle";
+  const rbDot: DotStatus = !gatewayBase ? "idle" : robotConnected ? "connected" : "error";
+  const aiDot: DotStatus = aiserver.status === "connected" ? "connected" : aiserver.status === "error" ? "error" : "idle";
   const camDot: DotStatus = cameraStarted ? "connected" : "idle";
 
   // API helpers
@@ -253,7 +256,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
     if (!gatewayBase) return;
     setCameraLoading(true);
     try {
-      const data = await apiGet("/api/camera/realsense/status");
+      const data = await apiGet("/api/cameras/realsense/status");
       const cam = data?.camera || {};
       setCameraStarted(!!cam.started);
       setCameraLastError(cam.last_error || "");
@@ -270,7 +273,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
     if (!gatewayBase) return;
     setGripperLoading(true);
     try {
-      const data = await apiGet("/api/gripper/status");
+      const data = await apiGet("/api/robot/gripper/status");
       const g = data?.gripper || data || {};
 
       // Detect availability (adapt this to your backend payload if you have a better flag)
@@ -278,10 +281,10 @@ export default function ManualControlScreen({ navigation, route }: any) {
         typeof g.available === "boolean"
           ? g.available
           : typeof g.connected === "boolean"
-          ? g.connected
-          : typeof g.gripper_pct === "number" || typeof g.pct === "number"
-          ? true
-          : false;
+            ? g.connected
+            : typeof g.gripper_pct === "number" || typeof g.pct === "number"
+              ? true
+              : false;
 
       setGripperAvailable(available);
 
@@ -294,10 +297,10 @@ export default function ManualControlScreen({ navigation, route }: any) {
         typeof g.gripper_pct === "number"
           ? g.gripper_pct
           : typeof g.pct === "number"
-          ? g.pct
-          : typeof g.percent === "number"
-          ? g.percent
-          : 0;
+            ? g.pct
+            : typeof g.percent === "number"
+              ? g.percent
+              : 0;
 
       setGripperPct(clamp(Math.round(pct), 0, 100));
     } catch {
@@ -330,7 +333,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
     async (f: JogFrame) => {
       setFrame(f);
       try {
-        await apiPost("/api/frame", { frame: f.toLowerCase() });
+        await apiPost("/api/robot/frame", { frame: f.toLowerCase() });
       } catch {
         // silent
       }
@@ -341,7 +344,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const sendJogDelta = useCallback(
     async (payload: any) => {
       try {
-        await apiPost("/api/jog", payload);
+        await apiPost("/api/robot/jog", payload);
       } catch {
         // silent
       }
@@ -389,7 +392,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const sendGripper = useCallback(
     async (action: "open" | "close") => {
       try {
-        await apiPost("/api/gripper", { action });
+        await apiPost("/api/robot/gripper", { action });
         await refreshGripperStatus(); // refresh only after an action
       } catch (e: any) {
         Alert.alert("Gripper failed", e?.message || "Gripper action failed.");
@@ -400,7 +403,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
 
   const onStop = useCallback(async () => {
     try {
-      await apiPost("/api/stop");
+      await apiPost("/api/robot/stop");
     } catch (e: any) {
       Alert.alert("STOP failed", e?.message || "Stop failed.");
     }
@@ -411,8 +414,8 @@ export default function ManualControlScreen({ navigation, route }: any) {
     try {
       if (!gatewayBase) return Alert.alert("Gateway missing", "Please set Gateway in Connection Hub.");
       if (!robotConnected) return Alert.alert("Robot not connected", "Connect the robot from Connection Hub first.");
-      if (enabled) await apiPost("/api/disable");
-      else await apiPost("/api/enable");
+      if (enabled) await apiPost("/api/robot/disable");
+      else await apiPost("/api/robot/enable");
     } catch (e: any) {
       Alert.alert("Action failed", e?.message || "Enable/Disable failed.");
     }
@@ -420,7 +423,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
 
   const onClearSafety = useCallback(async () => {
     try {
-      await apiPost("/api/safety/clear");
+      await apiPost("/api/robot/safety/clear");
     } catch (e: any) {
       Alert.alert("Clear Safety failed", e?.message || "Clear Safety failed.");
     }
@@ -429,7 +432,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const onRobotHome = useCallback(async () => {
     try {
       // Change this endpoint if your backend uses a different one.
-      await apiPost("/api/home");
+      await apiPost("/api/robot/home");
     } catch (e: any) {
       Alert.alert("Home failed", e?.message || "Robot home action failed.");
     }
@@ -439,7 +442,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
     if (!gatewayBase) return;
     setCameraLoading(true);
     try {
-      await apiPost("/api/camera/realsense/start");
+      await apiPost("/api/cameras/realsense/start");
       await refreshCameraStatus();
     } catch (e: any) {
       Alert.alert("Camera start failed", e?.message || "Camera start failed.");
@@ -452,7 +455,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
     if (!gatewayBase) return;
     setCameraLoading(true);
     try {
-      await apiPost("/api/camera/realsense/stop");
+      await apiPost("/api/cameras/realsense/stop");
       await refreshCameraStatus();
     } catch (e: any) {
       Alert.alert("Camera stop failed", e?.message || "Camera stop failed.");
@@ -466,7 +469,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
       const v = clamp(Math.round(nextPct), 1, 100);
       setSpeedPct(v);
       try {
-        await apiPost("/api/speed", { speed_pct: v });
+        await apiPost("/api/robot/speed", { speed_pct: v });
       } catch {
         // silent
       }
@@ -502,27 +505,56 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const gripperRightText = gripperLoading
     ? "Loading…"
     : !gripperAvailable
-    ? "N/A"
-    : `${gripperPct}/100`;
+      ? "N/A"
+      : `${gripperPct}/100`;
+
+  // --- TopBar derived states (just above return is fine)
+  const canRobotToggle = !!gatewayBase && robotConnected;
+  const canCameraToggle = !!gatewayBase && !cameraLoading;
+
+  const robotBtnLabel = enabled ? "Robot-On" : "Robot-Off";
+  const robotBtnIcon = enabled? "robot-industrial": "robot-industrial-outline";
+  const robotBtnTone: "ghost" | "primary" = enabled ? "ghost" : "primary";
+
+  const camBtnLabel = cameraStarted ? "Cam-On" : "Cam-Off";
+  const camBtnIcon = cameraStarted ? "cctv" : "cctv-off";
+  const camBtnTone: "primary" | "danger" = cameraStarted ? "danger" : "primary";
+
+  const onCameraToggle = () => {
+    if (cameraStarted) onCameraStop();
+    else onCameraStart();
+  };
+
 
   return (
     <ImageBackground source={require("../../assets/splash.jpg")} style={styles.bg} resizeMode="cover">
       <View style={styles.dim} />
       <SafeAreaView style={styles.safe}>
         {/* Top bar (clean single row) */}
+
+
         <View style={styles.topBar}>
           <View style={styles.topLeft}>
-            <IconBtn icon="menu" label="Status" onPress={() => setLeftOpen(true)} />
+            <IconBtn icon="menu" label="Status" onPress={() => setLeftOpen(true)} size="md" />
           </View>
 
           <View style={styles.topMid}>
-            {/* Frame toggles */}
+            {/* Left group: Frame + Camera toggle */}
             <View style={styles.topGroup}>
               <PillToggle label="Base" active={frame === "Base"} onPress={() => pushFrame("Base")} />
               <PillToggle label="Tool" active={frame === "Tool"} onPress={() => pushFrame("Tool")} />
+
+              <IconBtn
+                icon={camBtnIcon as any}
+                label={camBtnLabel}
+                tone={camBtnTone}
+                onPress={onCameraToggle}
+                disabled={!canCameraToggle}
+                size="sm"
+              />
             </View>
 
-            {/* Compact dots */}
+            {/* Dots */}
             <View style={styles.topDots}>
               <View style={styles.dotLine}>
                 <View style={[styles.dot, dotStyle(gwDot)]} />
@@ -542,15 +574,24 @@ export default function ManualControlScreen({ navigation, route }: any) {
               </View>
             </View>
 
-            {/* Mode toggles */}
+            {/* Right group: Robot toggle + Mode */}
             <View style={styles.topGroup}>
+              <IconBtn
+                icon={robotBtnIcon as any}
+                label={robotBtnLabel}
+                tone={robotBtnTone}
+                onPress={onEnableDisable}
+                disabled={!canRobotToggle}
+                size="sm"
+              />
+
               <PillToggle label="XYZ" active={mode === "XYZ"} onPress={() => setMode("XYZ")} />
               <PillToggle label="RXYZ" active={mode === "RXYZ"} onPress={() => setMode("RXYZ")} />
             </View>
           </View>
 
           <View style={styles.topRight}>
-            <IconBtn icon="cog-outline" label="Settings" onPress={() => setRightOpen(true)} />
+            <IconBtn icon="cog-outline" label="Settings" onPress={() => setRightOpen(true)} size="md" />
           </View>
         </View>
 
@@ -598,7 +639,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
           {/* CENTER */}
           <View style={styles.center}>
             <View style={styles.cameraCard}>
-              {!cameraUrl ? (
+              {!realsenseMjpegUrl ? (
                 <View style={styles.cameraPlaceholder}>
                   <Text style={styles.cameraPlaceholderText}>No Gateway URL</Text>
                 </View>
@@ -621,7 +662,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
                           <html>
                             <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
                             <body style="margin:0;background:#000;">
-                              <img src="${cameraUrl}" style="width:100%;height:100%;object-fit:contain;" />
+                              <img src="${realsenseMjpegUrl}" style="width:100%;height:100%;object-fit:contain;" />
                             </body>
                           </html>
                         `,
@@ -693,7 +734,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
         {leftOpen && (
           <View style={styles.drawerOverlay}>
             <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setLeftOpen(false)} />
-            <View style={[styles.drawer, { left: 12, width: clamp(Math.round(width * 0.60), 320, 560) }]}>
+            <View style={[styles.drawer, { left: 12, width: clamp(Math.round(width * 0.40), 320, 560) }]}>
               <View style={styles.drawerHeader}>
                 <Text style={styles.drawerTitle}>Status</Text>
                 <IconBtn icon="close" onPress={() => setLeftOpen(false)} />
@@ -765,7 +806,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
         {rightOpen && (
           <View style={styles.drawerOverlay}>
             <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setRightOpen(false)} />
-            <View style={[styles.drawer, { right: 12, width: clamp(Math.round(width * 0.60), 320, 560) }]}>
+            <View style={[styles.drawer, { right: 12, width: clamp(Math.round(width * 0.40), 320, 560) }]}>
               <View style={styles.drawerHeader}>
                 <Text style={styles.drawerTitle}>Settings</Text>
                 <IconBtn icon="close" onPress={() => setRightOpen(false)} />
@@ -855,22 +896,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
                   </View>
                 </View>
 
-                {/* Gripper */}
-                <View style={styles.drawerCard}>
-                  <Text style={styles.drawerSectionTitle}>Gripper</Text>
-                  <Text style={styles.drawerHint}>
-                    {gripperLoading ? "Loading…" : !gripperAvailable ? "Not available" : `Position: ${gripperPct}/100`}
-                  </Text>
-                  <View style={[styles.barTrack, !gripperAvailable ? styles.barTrackInactive : null]}>
-                    <View
-                      style={[
-                        styles.barFill,
-                        !gripperAvailable ? styles.barFillInactive : null,
-                        { width: pctToWidth(gripperAvailable ? gripperPct : 0) },
-                      ]}
-                    />
-                  </View>
-                </View>
+
               </ScrollView>
             </View>
           </View>
@@ -888,13 +914,16 @@ const styles = StyleSheet.create({
   // Top bar
   topBar: {
     flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
     paddingHorizontal: 12,
     paddingTop: 0,
     gap: 10,
   },
-  topLeft: { width: 170, alignItems: "flex-start" },
-  topRight: { width: 170, alignItems: "flex-end" },
+
+  topLeft: { alignItems: "flex-start" },
+  topRight: { alignItems: "flex-end" },
+
   topMid: {
     flex: 1,
     height: 46,
@@ -907,25 +936,64 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
+    gap: 8,
   },
-  topGroup: { flexDirection: "row", gap: 8, alignItems: "center" },
-  topDots: { flexDirection: "row", gap: 10, alignItems: "center" },
 
-  dotLine: { flexDirection: "row", alignItems: "center", gap: 6 },
-  dotText: { color: "rgba(255,255,255,0.75)", fontWeight: "900", fontSize: 11 },
+  topGroup: {
+    flexDirection: "row",
+    gap: 8,
+    alignItems: "center",
+    flex: 1,
+    minWidth: 0,
+  },
+
+  topDots: {
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "center",
+    paddingHorizontal: 8,
+    flexShrink: 0,
+  },
+
 
   iconBtn: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    borderRadius: 999,
+    justifyContent: "center",
     paddingHorizontal: 12,
+    borderRadius: 999,
     paddingVertical: 10,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
     backgroundColor: "rgba(0,0,0,0.18)",
   },
+
+  iconBtnText: {
+    color: "white",
+    fontWeight: "900",
+    fontSize: 12,
+  },
+
+  iconBtnSm: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    gap: 6,
+  },
+
+  iconBtnTextSm: {
+    fontSize: 11,
+  },
+
+
+
+
+
+  dotLine: { flexDirection: "row", alignItems: "center", gap: 6 },
+  dotText: { color: "rgba(255,255,255,0.75)", fontWeight: "900", fontSize: 11 },
+
+
+
   iconBtnPrimary: {
     backgroundColor: "rgba(37, 99, 235, 0.92)",
     borderColor: "rgba(37, 99, 235, 0.65)",
@@ -934,7 +1002,8 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(239, 68, 68, 0.92)",
     borderColor: "rgba(239, 68, 68, 0.65)",
   },
-  iconBtnText: { color: "white", fontWeight: "900", fontSize: 12 },
+
+
 
   body: {
     flex: 1,
@@ -966,11 +1035,11 @@ const styles = StyleSheet.create({
   cameraPlaceholder: { flex: 1, alignItems: "center", justifyContent: "center" },
   cameraPlaceholderText: { color: "rgba(255,255,255,0.55)", fontWeight: "900" },
 
-  cameraBox: { flex: 1, padding: 12 },
+  cameraBox: { flex: 1, padding: 6, justifyContent: "center", alignItems: "center" },
   cameraAspect: {
-    width: "100%",
+    //width: "90%",
     aspectRatio: 4 / 3,
-    borderRadius: 18,
+    //borderRadius: 18,
     overflow: "hidden",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
@@ -997,8 +1066,8 @@ const styles = StyleSheet.create({
   pillToggle: {
     minWidth: 64,
     borderRadius: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(0,0,0,0.16)",
@@ -1015,7 +1084,7 @@ const styles = StyleSheet.create({
     minWidth: 10,
     maxWidth: 90,
     borderRadius: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
     paddingHorizontal: 20,
     alignItems: "center",
     justifyContent: "center",
@@ -1030,8 +1099,8 @@ const styles = StyleSheet.create({
   jogBottomRow: { flexDirection: "row", gap: 10, alignItems: "center", justifyContent: "center" },
 
   crossCenter: {
-    width: 62,
-    height: 46,
+    width: 52,
+    height: 42,
     borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
@@ -1042,8 +1111,8 @@ const styles = StyleSheet.create({
   crossCenterText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 12 },
 
   jogCenter: {
-    width: 78,
-    height: 56,
+    width: 52,
+    height: 42,
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
@@ -1051,7 +1120,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
   },
-  jogCenterText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 14 },
+  jogCenterText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 12 },
 
   note: { marginTop: 14, color: "rgba(255,255,255,0.50)", fontWeight: "800", fontSize: 11, textAlign: "center" },
 
@@ -1090,7 +1159,7 @@ const styles = StyleSheet.create({
   barFill: { height: "100%", backgroundColor: "rgba(37, 99, 235, 0.95)" },
   barFillInactive: { backgroundColor: "rgba(148, 163, 184, 0.35)" },
 
-  speedBtnsRow: { flexDirection: "row", gap: 10, justifyContent: "center", marginTop: 10 },
+  speedBtnsRow: { flexDirection: "row", gap: 10, justifyContent: "center", margin: 10 },
 
   // Drawers
   drawerOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.55)", zIndex: 2000 },
