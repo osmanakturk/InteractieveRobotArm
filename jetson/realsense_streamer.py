@@ -1,3 +1,4 @@
+# jetson/realsense_streamer.py
 from __future__ import annotations
 
 import time
@@ -18,7 +19,6 @@ except Exception:
 class RealSenseMjpegStreamer:
     """
     RealSense color stream -> MJPEG (no detection).
-    You will run detection on AI server later.
     """
 
     def __init__(self) -> None:
@@ -45,7 +45,7 @@ class RealSenseMjpegStreamer:
 
     def is_started(self) -> bool:
         with self._lock:
-            return self._enabled and self._running
+            return bool(self._enabled and self._running)
 
     def start(self) -> bool:
         with self._lock:
@@ -59,7 +59,7 @@ class RealSenseMjpegStreamer:
 
     def open(self) -> bool:
         with self._lock:
-            if self._running:
+            if self._running and self._pipeline is not None:
                 return True
 
             if rs is None:
@@ -70,7 +70,6 @@ class RealSenseMjpegStreamer:
                 pipeline = rs.pipeline()
                 cfg = rs.config()
 
-                # For now: color only (simple + lower load).
                 cfg.enable_stream(
                     rs.stream.color,
                     CONFIG.rs_width,
@@ -93,60 +92,112 @@ class RealSenseMjpegStreamer:
 
     def close(self) -> None:
         with self._lock:
-            try:
-                if self._pipeline is not None:
-                    self._pipeline.stop()
-            except Exception:
-                pass
+            p = self._pipeline
             self._pipeline = None
             self._running = False
+
+        if p is not None:
+            try:
+                p.stop()
+            except Exception:
+                pass
 
     def _make_info_frame(self, text: str) -> bytes:
         w, h = CONFIG.rs_width, CONFIG.rs_height
         img = np.zeros((h, w, 3), dtype=np.uint8)
-        cv2.putText(img, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        ok, jpg = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(CONFIG.mjpeg_quality)])
+
+        # Centered-ish text
+        cv2.putText(img, text, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        ok, jpg = cv2.imencode(
+            ".jpg",
+            img,
+            [int(cv2.IMWRITE_JPEG_QUALITY), int(CONFIG.mjpeg_quality)],
+        )
         return jpg.tobytes() if ok else b""
 
+    @staticmethod
+    def _wrap_jpg(jpg_bytes: bytes) -> bytes:
+        return b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg_bytes + b"\r\n"
+
     def frames(self) -> Generator[bytes, None, None]:
-        # If not enabled, yield static frame
-        with self._lock:
-            enabled = self._enabled
+        """
+        IMPORTANT:
+        - Must react to stop()/start() while the client keeps the same HTTP connection open.
+        - Use poll_for_frames() to avoid blocking forever (so stop works instantly).
+        """
+        info_stopped = self._make_info_frame("Camera is OFF. Press Cam-On to start.")
+        last_info_sent_at = 0.0
 
-        if not enabled:
-            jpg = self._make_info_frame("RealSense stream is stopped. Press Start.")
-            while True:
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+        while True:
+            with self._lock:
+                enabled = bool(self._enabled)
+                running = bool(self._running)
+                pipeline = self._pipeline
+
+            # If disabled: ensure closed and keep yielding info frames
+            if not enabled:
+                if running or pipeline is not None:
+                    self.close()
+
+                now = time.monotonic()
+                # avoid re-encoding constantly
+                if now - last_info_sent_at > 2.0:
+                    info_stopped = self._make_info_frame("Camera is OFF. Press Cam-On to start.")
+                    last_info_sent_at = now
+
+                yield self._wrap_jpg(info_stopped)
                 time.sleep(0.2)
+                continue
 
-        if not self.open():
-            err = self.last_error() or "RealSense not available"
-            jpg = self._make_info_frame(err)
-            while True:
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
-                time.sleep(0.2)
+            # Enabled but not running: try open
+            if not running or pipeline is None:
+                ok = self.open()
+                if not ok:
+                    err = self.last_error() or "RealSense not available"
+                    jpg = self._make_info_frame(err)
+                    yield self._wrap_jpg(jpg)
+                    time.sleep(0.25)
+                    continue
 
-        assert self._pipeline is not None
+                with self._lock:
+                    pipeline = self._pipeline
 
-        try:
-            while True:
-                frameset = self._pipeline.wait_for_frames()
+            if pipeline is None:
+                jpg = self._make_info_frame("Camera pipeline missing.")
+                yield self._wrap_jpg(jpg)
+                time.sleep(0.25)
+                continue
+
+            try:
+                # Non-blocking fetch -> allows stop() to take effect immediately
+                frameset = pipeline.poll_for_frames()
+                if not frameset:
+                    time.sleep(0.005)
+                    continue
+
                 color_frame = frameset.get_color_frame()
                 if not color_frame:
                     time.sleep(0.005)
                     continue
 
                 color_image = np.asanyarray(color_frame.get_data())  # BGR
-                ok, jpg = cv2.imencode(".jpg", color_image, [int(cv2.IMWRITE_JPEG_QUALITY), int(CONFIG.mjpeg_quality)])
+
+                ok, jpg = cv2.imencode(
+                    ".jpg",
+                    color_image,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), int(CONFIG.mjpeg_quality)],
+                )
                 if not ok:
                     continue
 
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
-                time.sleep(1.0 / max(1, CONFIG.rs_fps))
+                yield self._wrap_jpg(jpg.tobytes())
+                time.sleep(1.0 / max(1, int(CONFIG.rs_fps)))
 
-        except GeneratorExit:
-            pass
-        except Exception as e:
-            self._set_err(f"stream error: {e}")
-        finally:
-            pass
+            except GeneratorExit:
+                return
+            except Exception as e:
+                # Mark error and fall back to loop (will reopen or show error)
+                self._set_err(f"stream error: {e}")
+                self.close()
+                time.sleep(0.1)
+                continue

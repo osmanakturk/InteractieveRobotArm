@@ -1,4 +1,4 @@
-// src/screens/ManualControlScreen.tsx
+// src/screens/TestScreen.tsx
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,

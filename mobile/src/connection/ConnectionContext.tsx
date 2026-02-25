@@ -1,3 +1,4 @@
+// src/connection/ConnectionContext.tsx
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
@@ -207,10 +208,10 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         if (rbV) setRobot((s) => ({ ...s, value: rbV }));
         if (aiV) setAiServer((s) => ({ ...s, value: aiV }));
 
-        if (gwV) {
-          const base = normalizeBaseUrl(gwV);
-          startWs(base);
-        }
+        //if (gwV) {
+        //  const base = normalizeBaseUrl(gwV);
+        //  startWs(base);
+        //}
       } catch {}
     })();
 
@@ -230,8 +231,8 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       return;
     }
 
-    const base = normalizeBaseUrl(gwRaw);
-    startWs(base);
+    //const base = normalizeBaseUrl(gwRaw);
+    //startWs(base);
 
   }, [gateway.value]);
 
@@ -249,25 +250,28 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
   const connect = async (key: ConnKey) => {
     if (key === "gateway") {
-      const gw = normalizeBaseUrl(gateway.value.trim());
-      if (!gw) throw new Error("Gateway required.");
+  const gw = normalizeBaseUrl(gateway.value.trim());
+  if (!gw) throw new Error("Gateway required.");
 
-      setGateway((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
+  setGateway((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
 
-      const resp = await fetch(`${gw}/api/status`, { method: "GET" });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || data?.ok === false) {
-        setGateway((s) => ({
-          ...s,
-          status: "error",
-          message: data?.message || `Gateway not reachable (HTTP ${resp.status}).`,
-        }));
-        return;
-      }
+  const resp = await fetch(`${gw}/api/status`, { method: "GET" });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data?.ok === false) {
+    setGateway((s) => ({
+      ...s,
+      status: "error",
+      message: data?.message || `Gateway not reachable (HTTP ${resp.status}).`,
+    }));
+    return;
+  }
 
-      setGateway((s) => ({ ...s, status: "connected", message: "Gateway connected.", lastOkAt: Date.now() }));
-      return;
-    }
+
+  startWs(gw);
+
+  setGateway((s) => ({ ...s, status: "connected", message: "Gateway connected.", lastOkAt: Date.now() }));
+  return;
+}
 
     const gw = normalizeBaseUrl(gateway.value.trim());
     if (!gw) throw new Error("Gateway required.");

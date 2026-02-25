@@ -1,3 +1,4 @@
+// src/screens/SplashScreen.tsx
 import React, { useEffect, useRef } from "react";
 import { Image, StyleSheet, View } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";

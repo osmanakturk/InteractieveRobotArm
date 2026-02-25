@@ -65,7 +65,7 @@ function IconBtn({
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   label?: string;
   onPress: () => void;
-  tone?: "ghost" | "primary" | "danger";
+  tone?: "ghost" | "primary" | "danger" | "success";
   disabled?: boolean;
   size?: "sm" | "md";
 }) {
@@ -76,7 +76,7 @@ function IconBtn({
       style={({ pressed }) => [
         styles.iconBtn,
         size === "sm" ? styles.iconBtnSm : null,
-        tone === "primary" ? styles.iconBtnPrimary : tone === "danger" ? styles.iconBtnDanger : null,
+        tone === "primary" ? styles.iconBtnPrimary : tone === "danger" ? styles.iconBtnDanger : tone === "success" ? styles.iconBtnSuccess : null,
         disabled ? { opacity: 0.45 } : null,
         pressed && !disabled ? { opacity: 0.9 } : null,
       ]}
@@ -184,10 +184,13 @@ export default function ManualControlScreen({ navigation, route }: any) {
     () => normalizeBaseUrl(gateway.value || gatewayFromParams),
     [gateway.value, gatewayFromParams]
   );
-
+  const [streamNonce, setStreamNonce] = useState(0);
   // MJPEG stream
-  const realsenseMjpegUrl = useMemo(() => (gatewayBase ? `${gatewayBase}/api/cameras/realsense/stream/mjpeg` : ""), [gatewayBase]);
-
+  //const realsenseMjpegUrl = useMemo(() => (gatewayBase ? `${gatewayBase}/api/cameras/realsense/stream/mjpeg` : ""), [gatewayBase]);
+  const realsenseMjpegUrl = useMemo(() => {
+    if (!gatewayBase) return "";
+    return `${gatewayBase}/api/cameras/realsense/stream/mjpeg?t=${streamNonce}`;
+  }, [gatewayBase, streamNonce]);
   // UI state
   const [frame, setFrame] = useState<JogFrame>("Tool");
   const [mode, setMode] = useState<ControlMode>("XYZ");
@@ -215,11 +218,40 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const safetyLimit = !!(live as any)?.safety?.limit_hit;
 
   // Dots
-  const gwDot: DotStatus = wsConnected ? "connected" : gatewayBase ? "error" : "idle";
-  //const rbDot: DotStatus = robotConnected ? "connected" : robot.value.trim() ? "idle" : "idle";
-  const rbDot: DotStatus = !gatewayBase ? "idle" : robotConnected ? "connected" : "error";
-  const aiDot: DotStatus = aiserver.status === "connected" ? "connected" : aiserver.status === "error" ? "error" : "idle";
-  const camDot: DotStatus = cameraStarted ? "connected" : "idle";
+  const gatewayUp = !!gatewayBase && wsConnected;
+  const gwDot: DotStatus = !gatewayBase ? "idle" : wsConnected ? "connected" : "error";
+
+  const rbDot: DotStatus =
+    !gatewayBase
+      ? "idle"
+      : !gatewayUp
+        ? "error"
+        : robotConnected
+          ? "connected"
+          : "error";
+
+  const camDot: DotStatus =
+    !gatewayBase
+      ? "idle"
+      : !gatewayUp
+        ? "error"
+        : cameraStarted
+          ? "connected"
+          : "idle";
+
+  const aiConnected = !!(live as any)?.ai_server?.connected;
+  const aiConfigured = !!(live as any)?.ai_server?.configured;
+
+  const aiDot: DotStatus =
+    !gatewayBase
+      ? "idle"
+      : !gatewayUp
+        ? "error"
+        : aiConnected
+          ? "connected"
+          : aiConfigured
+            ? "error"
+            : "idle";
 
   // API helpers
   const apiPost = useCallback(
@@ -267,6 +299,17 @@ export default function ManualControlScreen({ navigation, route }: any) {
       setCameraLoading(false);
     }
   }, [apiGet, gatewayBase]);
+
+  // WS camera status sync (live payload)
+  const wsCamStarted = (live as any)?.camera?.started;
+  const wsCamErr = (live as any)?.camera?.last_error;
+
+  useEffect(() => {
+    if (typeof wsCamStarted === "boolean") setCameraStarted(wsCamStarted);
+    if (typeof wsCamErr === "string") setCameraLastError(wsCamErr);
+  }, [wsCamStarted, wsCamErr]);
+
+
 
   // IMPORTANT: no `live` dependency here (prevents refresh loop)
   const refreshGripperStatus = useCallback(async () => {
@@ -443,6 +486,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
     setCameraLoading(true);
     try {
       await apiPost("/api/cameras/realsense/start");
+      setStreamNonce((n) => n + 1); // force reconnect
       await refreshCameraStatus();
     } catch (e: any) {
       Alert.alert("Camera start failed", e?.message || "Camera start failed.");
@@ -456,6 +500,8 @@ export default function ManualControlScreen({ navigation, route }: any) {
     setCameraLoading(true);
     try {
       await apiPost("/api/cameras/realsense/stop");
+      setCameraStarted(false); // UX: immediately show placeholder
+      setStreamNonce((n) => n + 1); // drop old MJPEG connection
       await refreshCameraStatus();
     } catch (e: any) {
       Alert.alert("Camera stop failed", e?.message || "Camera stop failed.");
@@ -512,13 +558,13 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const canRobotToggle = !!gatewayBase && robotConnected;
   const canCameraToggle = !!gatewayBase && !cameraLoading;
 
-  const robotBtnLabel = enabled ? "Robot-On" : "Robot-Off";
-  const robotBtnIcon = enabled? "robot-industrial": "robot-industrial-outline";
-  const robotBtnTone: "ghost" | "primary" = enabled ? "ghost" : "primary";
+  const robotBtnLabel = enabled ? "Robot-Off" : "Robot-On";
+  const robotBtnIcon = enabled ? "robot-industrial" : "robot-industrial-outline";
+  const robotBtnTone = enabled ? "danger" : "success";
 
-  const camBtnLabel = cameraStarted ? "Cam-On" : "Cam-Off";
+  const camBtnLabel = cameraStarted ? "Cam-Off" : "Cam-On";
   const camBtnIcon = cameraStarted ? "cctv" : "cctv-off";
-  const camBtnTone: "primary" | "danger" = cameraStarted ? "danger" : "primary";
+  const camBtnTone = cameraStarted ? "danger" : "success";
 
   const onCameraToggle = () => {
     if (cameraStarted) onCameraStop();
@@ -639,14 +685,27 @@ export default function ManualControlScreen({ navigation, route }: any) {
           {/* CENTER */}
           <View style={styles.center}>
             <View style={styles.cameraCard}>
-              {!realsenseMjpegUrl ? (
+              {!gatewayBase ? (
                 <View style={styles.cameraPlaceholder}>
                   <Text style={styles.cameraPlaceholderText}>No Gateway URL</Text>
+                </View>
+              ) : !cameraStarted ? (
+                <View style={styles.cameraPlaceholder}>
+                  <Text style={styles.cameraPlaceholderText}>Camera is OFF</Text>
+                  <Text style={[styles.cameraPlaceholderText, { marginTop: 8, fontSize: 12, opacity: 0.75 }]}>
+                    Press Cam-On to start
+                  </Text>
+                  {!!cameraLastError && (
+                    <Text style={[styles.cameraPlaceholderText, { marginTop: 10, fontSize: 11, opacity: 0.7 }]}>
+                      {cameraLastError}
+                    </Text>
+                  )}
                 </View>
               ) : (
                 <View style={styles.cameraBox}>
                   <View style={styles.cameraAspect}>
                     <WebView
+                      key={`cam-${streamNonce}`}  // extra hard remount
                       originWhitelist={["*"]}
                       javaScriptEnabled={false}
                       domStorageEnabled={false}
@@ -1003,6 +1062,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(239, 68, 68, 0.65)",
   },
 
+  iconBtnSuccess: {
+    backgroundColor: "rgba(40, 183, 99, 0.92)",
+    borderColor: "rgba(40, 183, 99, 0.65)",
+  },
 
 
   body: {

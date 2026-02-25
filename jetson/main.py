@@ -1,3 +1,4 @@
+# jetson/main.py
 from __future__ import annotations
 
 import asyncio
@@ -351,9 +352,12 @@ async def ws_status(ws: WebSocket):
             await ws.send_json(
                 {
                     "ok": True,
-                    "robot": robot.status(),
+                    "status": robot.status(),  # <-- robot yerine status
                     "safety": robot.safety_status(),
-                    "cameras": {"realsense": {"started": camera.is_started(), "last_error": camera.last_error()}},
+                    "camera": {
+                        "started": camera.is_started(),
+                        "last_error": camera.last_error(),
+                    },
                     "ai_server": await ai.status(),
                 }
             )
