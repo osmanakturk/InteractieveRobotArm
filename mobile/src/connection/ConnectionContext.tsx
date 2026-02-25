@@ -78,7 +78,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const reconnectTimerRef = useRef<any>(null);
   const reconnectAttemptsRef = useRef(0);
 
-  // ✅ “Ben kapattım” durumunda reconnect etmesin
   const intentionalCloseRef = useRef(false);
 
   const clearReconnectTimer = () => {
@@ -99,7 +98,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     } catch {}
     wsRef.current = null;
 
-    // kısa bir tick sonra tekrar otomatik kapanma flag'ini düşür (restart sonrası açılabilsin)
     setTimeout(() => {
       if (reason !== "manual") intentionalCloseRef.current = false;
     }, 0);
@@ -118,7 +116,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   };
 
   const applyLiveToConnStates = (data: LiveStatusPayload) => {
-    // Gateway connected => WS açık demektir.
     setGateway((s) => ({
       ...s,
       status: "connected",
@@ -152,7 +149,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const startWs = (baseHttp: string) => {
     const wsUrl = gatewayToWsUrl(baseHttp);
 
-    // restart: intentional flag’i kısa süreli true kalsın (onclose reconnect tetiklemesin)
     stopWs("restart");
     setWsConnected(false);
 
@@ -161,7 +157,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       wsRef.current = ws;
 
       ws.onopen = () => {
-        intentionalCloseRef.current = false; // artık gerçek bağlantı var
+        intentionalCloseRef.current = false; 
         setWsConnected(true);
         reconnectAttemptsRef.current = 0;
 
@@ -185,7 +181,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       ws.onclose = () => {
         setWsConnected(false);
 
-        // ✅ manual/restart close ise reconnect yapma
         if (intentionalCloseRef.current) return;
 
         scheduleReconnect(baseHttp);
@@ -195,7 +190,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     }
   };
 
-  // 1) İlk açılış: AsyncStorage load + WS start
   useEffect(() => {
     (async () => {
       try {
@@ -221,10 +215,8 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     })();
 
     return () => stopWs("manual");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) Gateway value değişince WS restart
   useEffect(() => {
     const gwRaw = gateway.value.trim();
 
@@ -241,7 +233,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     const base = normalizeBaseUrl(gwRaw);
     startWs(base);
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gateway.value]);
 
   const setValue = async (key: ConnKey, value: string) => {
@@ -257,7 +248,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   };
 
   const connect = async (key: ConnKey) => {
-    // CONNECT: istek atar; gerçek durum WS ile gelir.
     if (key === "gateway") {
       const gw = normalizeBaseUrl(gateway.value.trim());
       if (!gw) throw new Error("Gateway required.");
@@ -288,7 +278,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
       setRobot((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
 
-      const resp = await fetch(`${gw}/api/connect`, {
+      const resp = await fetch(`${gw}/api/robot/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ip }),
@@ -332,7 +322,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
     if (key === "gateway") {
       if (gw) {
-        await fetch(`${gw}/api/gateway/disconnect`, {
+        await fetch(`${gw}/api/disconnect`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
@@ -351,7 +341,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     if (!gw) throw new Error("Gateway required.");
 
     if (key === "robot") {
-      await fetch(`${gw}/api/disconnect`, { method: "POST" }).catch(() => {});
+      await fetch(`${gw}/api/robot/disconnect`, { method: "POST" }).catch(() => {});
       setRobot((s) => ({ ...s, status: "idle", message: "Robot disconnected." }));
       return;
     }
@@ -376,3 +366,6 @@ export function useConnection() {
   if (!ctx) throw new Error("useConnection must be used inside <ConnectionProvider />");
   return ctx;
 }
+
+
+
