@@ -8,10 +8,11 @@ from xarm.wrapper import XArmAPI
 import time
 
 # --- CONFIGURATION ---
-CAMERA_SERVER_IP = "192.168.1.20"  # PC'nin IP'si
-STREAM_URL = f"http://{CAMERA_SERVER_IP}:8000/video_feed"
-ROBOT_IP = "192.168.1.30"          # Robot IP'si
 
+
+CAMERA_SERVER_IP = "10.2.172.118"   
+STREAM_URL = f"http://{CAMERA_SERVER_IP}:8000/video_feed"
+ROBOT_IP = "10.2.172.20"
 # OpenVLA Ayarları
 SCALE_FACTOR_XYZ = 150.0  # OpenVLA'nın küçük hareketlerini milimetreye çevirme katsayısı
 GRIPPER_THRESHOLD = 0.5
@@ -42,7 +43,7 @@ def connect_robot():
         
         arm.set_gripper_enable(True)
         arm.set_gripper_position(850, wait=True)
-        arm.set_position(x=300, y=0, z=250, roll=180, pitch=0, yaw=0, speed=100, wait=False)
+        arm.set_position(x=300, y=0, z=400, roll=180, pitch=0, yaw=0, speed=100, wait=False)
         print("[SUCCESS] Robot connected!")
         return arm
     except Exception as e:
@@ -58,8 +59,7 @@ def main():
 
     arm = connect_robot()
 
-    # 1. YOLOv8 Yükle (Seçim için)
-    print("[INFO] Loading YOLOv8-Seg model...")
+    print("[INFO] Loading YOLO-Seg model...")
     yolo_model = YOLO("models/yolo26m-seg.pt")
 
     # 2. OpenVLA Yükle (Sürüş için)

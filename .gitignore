@@ -78,3 +78,4 @@ yarn-error.*
 *.iml
 *.dylib
 *.so
+mobileclip2_b.ts
