@@ -22,11 +22,15 @@ warnings.filterwarnings("ignore", module="torch.serialization")
 # =========================
 # NETWORK
 # =========================
-CAMERA_SERVER_IP = "10.2.172.118"
-STREAM_URL = f"http://{CAMERA_SERVER_IP}:8000/video_feed"
-API_URL = f"http://{CAMERA_SERVER_IP}:8000/api/get_grasp_pack"
+#CAMERA_SERVER_IP = "10.2.172.118"
+#ROBOT_IP = "10.2.172.20"
 
-ROBOT_IP = "10.2.172.20"
+CAMERA_SERVER_IP = "192.168.1.20"
+ROBOT_IP = "192.168.1.30"
+
+#STREAM_URL = f"http://{CAMERA_SERVER_IP}:8000/video_feed"
+#API_URL = f"http://{CAMERA_SERVER_IP}:8000/api/get_grasp_pack"
+
 
 # =========================
 # MODELS

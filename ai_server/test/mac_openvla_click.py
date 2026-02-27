@@ -10,12 +10,15 @@ import time
 # --- CONFIGURATION ---
 
 
-CAMERA_SERVER_IP = "10.2.172.118"   
+#CAMERA_SERVER_IP = "10.2.172.118"   
+#ROBOT_IP = "10.2.172.20"
+CAMERA_SERVER_IP = "192.168.1.20"
+ROBOT_IP = "192.168.1.30"
 STREAM_URL = f"http://{CAMERA_SERVER_IP}:8000/video_feed"
-ROBOT_IP = "10.2.172.20"
+
 # OpenVLA Ayarları
 SCALE_FACTOR_XYZ = 150.0  # OpenVLA'nın küçük hareketlerini milimetreye çevirme katsayısı
-GRIPPER_THRESHOLD = 0.5
+GRIPPER_THRESHOLD = -0.3
 SAFE_Z_LIMIT = 50.0      # Masaya çarpmamak için minimum Z yüksekliği (mm)
 
 # Durumlar
@@ -163,7 +166,16 @@ def main():
                 with torch.no_grad():
                     action = vla_model.predict_action(**inputs, unnorm_key="bridge_orig", do_sample=False)
                 
-                action_raw = action.flatten()
+                    action_raw = action.flatten()
+                    
+                    # Eğer numpy ise direkt kullan
+                    ar = np.array(action_raw).flatten()
+                    
+                    print("[VLA] len:", ar.shape[0])
+                    print("[VLA] vals:", np.round(ar, 3).tolist())
+                    
+                    if ar.shape[0] > 6:
+                        print("[VLA] gripper(raw[6]):", float(ar[6]))
                 
                 # 3. Robotu Hareket Ettir
                 if len(action_raw) >= 7 and arm is not None:
@@ -189,7 +201,7 @@ def main():
                             print("[INFO] VLA Decided to GRASP! Stopping movement.")
                             arm.set_gripper_position(0, wait=True)
                             time.sleep(1)
-                            arm.set_position(z=250, wait=True) # Havaya kaldır
+                            arm.set_position(z=400, wait=True) # Havaya kaldır
                             robot_state = "SELECTING" # Seçime geri dön
                             arm.set_gripper_position(850, wait=True) # Bırak
             else:
