@@ -1,3 +1,4 @@
+# jetson/ai_server_monitor.py
 from __future__ import annotations
 
 import asyncio
@@ -8,31 +9,15 @@ import httpx
 
 
 def normalize_any_http(input_value: str) -> str:
-    """
-    Accepts:
-      - "192.168.1.20:9000"
-      - "http://192.168.1.20:9000"
-      - "https://192.168.1.20:9000"
-    Returns a valid http(s) URL.
-    Rule: if no scheme -> prepend http://
-    """
     raw = (input_value or "").strip()
     if not raw:
         return ""
     if raw.lower().startswith("http://") or raw.lower().startswith("https://"):
-        return raw
-    return f"http://{raw}"
+        return raw.rstrip("/")
+    return f"http://{raw}".rstrip("/")
 
 
 class AiMonitor:
-    """
-    Minimal AI server monitor that:
-      - stores configured URL
-      - health-checks GET {url}/health
-      - tracks last latency, last check ts, last error
-      - supports a watchdog loop
-    """
-
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._configured_url: Optional[str] = None
@@ -40,6 +25,7 @@ class AiMonitor:
         self._last_check_ts: Optional[float] = None
         self._last_latency_ms: Optional[int] = None
         self._last_error: str = ""
+        self._modes: Optional[Dict[str, Any]] = None
 
         self._client: Optional[httpx.AsyncClient] = None
         self._last_logged_connected: Optional[bool] = None
@@ -59,25 +45,22 @@ class AiMonitor:
             self._last_error = ""
             self._last_latency_ms = None
             self._last_check_ts = None
+            self._modes = None
             self._last_logged_connected = None
 
-        print(f"[AI] configured url -> {url}")
         ok1, msg = await self.check_once()
         if ok1:
-            print(f"[AI] CONNECTED -> {url}")
             return True, "AI server connected."
-        print(f"[AI] connect failed -> {msg}")
         return False, msg
 
     async def disconnect(self) -> None:
         async with self._lock:
-            if self._configured_url:
-                print(f"[AI] DISCONNECTED -> {self._configured_url}")
             self._configured_url = None
             self._connected = False
             self._last_error = ""
             self._last_latency_ms = None
             self._last_check_ts = None
+            self._modes = None
             self._last_logged_connected = None
 
     async def check_once(self) -> Tuple[bool, str]:
@@ -88,6 +71,7 @@ class AiMonitor:
         if not url:
             async with self._lock:
                 self._connected = False
+                self._modes = None
             return False, "AI server not configured."
 
         if client is None:
@@ -101,11 +85,21 @@ class AiMonitor:
             dt_ms = int((time.perf_counter() - t0) * 1000)
 
             if r.status_code == 200 and bool(data.get("ok")):
+                modes = None
+                # optional: modes status
+                try:
+                    mr = await client.get(url.rstrip("/") + "/api/ai_server/modes/status")
+                    if mr.status_code == 200:
+                        modes = mr.json()
+                except Exception:
+                    modes = None
+
                 async with self._lock:
                     self._connected = True
                     self._last_error = ""
                     self._last_latency_ms = dt_ms
                     self._last_check_ts = time.time()
+                    self._modes = modes
                 return True, "OK"
 
             msg = f"Health not OK (http={r.status_code})"
@@ -114,6 +108,7 @@ class AiMonitor:
                 self._last_error = msg
                 self._last_latency_ms = dt_ms
                 self._last_check_ts = time.time()
+                self._modes = None
             return False, msg
 
         except Exception as e:
@@ -124,6 +119,7 @@ class AiMonitor:
                 self._last_error = msg
                 self._last_latency_ms = dt_ms
                 self._last_check_ts = time.time()
+                self._modes = None
             return False, msg
 
     async def status(self) -> Dict[str, Any]:
@@ -135,6 +131,7 @@ class AiMonitor:
                 "last_check_ts": self._last_check_ts,
                 "latency_ms": self._last_latency_ms,
                 "error": self._last_error,
+                "modes": self._modes,
             }
 
     async def log_on_change(self) -> None:

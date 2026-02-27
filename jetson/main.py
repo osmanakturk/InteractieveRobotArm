@@ -1,3 +1,4 @@
+# jetson/main.py
 from __future__ import annotations
 
 import asyncio
@@ -18,9 +19,6 @@ from realsense_streamer import RealSenseMjpegStreamer
 from ai_server_monitor import AiMonitor, ai_watchdog_loop
 
 
-# -------------------------
-# Windows: reduce noisy ConnectionResetError (WinError 10054)
-# -------------------------
 if platform.system().lower().startswith("win"):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
@@ -28,9 +26,6 @@ if platform.system().lower().startswith("win"):
         pass
 
 
-# -------------------------
-# Helpers (JSON)
-# -------------------------
 def ok(data: Optional[Dict[str, Any]] = None):
     payload = {"ok": True}
     if data:
@@ -45,9 +40,6 @@ def fail(message: str, status: int = 400, data: Optional[Dict[str, Any]] = None)
     return JSONResponse(payload, status_code=status)
 
 
-# -------------------------
-# Bodies
-# -------------------------
 class RobotConnectBody(BaseModel):
     ip: str
 
@@ -69,6 +61,17 @@ class JogBody(BaseModel):
     dyaw: float = 0.0
 
 
+class RobotMovePoseBody(BaseModel):
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
+    speed: int = Field(120, ge=1, le=2000)
+    wait: bool = True
+
+
 class GripperBody(BaseModel):
     action: str  # open|close
 
@@ -83,9 +86,6 @@ class GraspPackBody(BaseModel):
     crop_size: int = Field(300, description="square crop size")
 
 
-# -------------------------
-# Singletons
-# -------------------------
 robot = RobotController()
 camera = RealSenseMjpegStreamer()
 ai = AiMonitor()
@@ -144,9 +144,6 @@ app.add_middleware(
 )
 
 
-# =========================================================
-# STATUS
-# =========================================================
 @app.get("/api/status")
 async def api_status():
     intr = camera.get_intrinsics()
@@ -168,9 +165,6 @@ async def api_status():
     )
 
 
-# =========================================================
-# GATEWAY RESET
-# =========================================================
 @app.post("/api/disconnect")
 async def api_gateway_disconnect():
     try:
@@ -196,9 +190,9 @@ async def api_gateway_disconnect():
     )
 
 
-# =========================================================
+# -------------------------
 # ROBOT
-# =========================================================
+# -------------------------
 @app.post("/api/robot/connect")
 def api_robot_connect(body: RobotConnectBody):
     success, msg = robot.connect(body.ip)
@@ -273,6 +267,19 @@ def api_robot_jog(body: JogBody):
     return ok({"message": msg})
 
 
+# NEW: absolute pose move (required by pick_and_place)
+@app.post("/api/robot/move_pose")
+def api_robot_move_pose(body: RobotMovePoseBody):
+    success, msg = robot.move_pose(
+        x=body.x, y=body.y, z=body.z,
+        roll=body.roll, pitch=body.pitch, yaw=body.yaw,
+        speed=body.speed, wait=body.wait,
+    )
+    if not success:
+        return fail(msg)
+    return ok({"message": msg})
+
+
 @app.get("/api/robot/gripper/status")
 def api_robot_gripper_status():
     return ok({"gripper": robot.gripper_status()})
@@ -293,9 +300,9 @@ def api_robot_safety_clear():
     return ok({"message": "Safety status cleared.", "safety": robot.safety_status()})
 
 
-# =========================================================
+# -------------------------
 # AI SERVER
-# =========================================================
+# -------------------------
 @app.post("/api/ai_server/connect")
 async def api_ai_connect(body: AiServerBody):
     success, msg = await ai.configure_and_connect(body.url)
@@ -310,9 +317,9 @@ async def api_ai_disconnect():
     return ok({"message": "AI server disconnected.", "ai_server": await ai.status()})
 
 
-# =========================================================
+# -------------------------
 # CAMERAS (RealSense)
-# =========================================================
+# -------------------------
 @app.post("/api/cameras/realsense/start")
 def api_camera_realsense_start():
     started = camera.start()
@@ -342,30 +349,21 @@ def api_camera_realsense_status():
 
 @app.get("/api/cameras/realsense/stream/mjpeg")
 def api_camera_realsense_stream_mjpeg():
-    return StreamingResponse(
-        camera.frames(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+    return StreamingResponse(camera.frames(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-# =========================================================
-# PICK & PLACE (GGCNN)
-# =========================================================
-@app.post("/api/pick_place/get_grasp_pack")
+# GGCNN grasp pack
+@app.post("/api/cameras/realsense/get_grasp_pack")
 def api_pick_place_get_grasp_pack(body: GraspPackBody):
-    """
-    Delegates to camera.get_grasp_pack() for clean architecture.
-    """
     pack = camera.get_grasp_pack(body.x, body.y, body.crop_size, auto_start=True)
     if not pack.get("valid"):
-        # 503 => camera/depth not ready or camera off
         return JSONResponse(status_code=503, content=pack)
     return pack
 
 
-# =========================================================
+# -------------------------
 # WEBSOCKET
-# =========================================================
+# -------------------------
 @app.websocket("/ws/status")
 async def ws_status(ws: WebSocket):
     await ws.accept()
