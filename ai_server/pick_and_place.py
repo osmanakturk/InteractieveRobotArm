@@ -1,7 +1,4 @@
 # ai_server/pick_and_place.py
-# Production-ish controller: click-to-pick with GGCNN (optional YOLO validation), homography XY mapping,
-# safe Z limits, vision pose stabilization, step-down pick attempts.
-
 
 # Hotkeys:
 #   q : quit
@@ -19,10 +16,10 @@ import os
 import threading
 import time
 import warnings
-from dataclasses import asdict
 from typing import Any, Dict, Optional, Tuple
 
 import cv2
+import httpx
 import numpy as np
 import scipy.ndimage as ndimage
 import torch
@@ -31,21 +28,12 @@ from skimage.feature import peak_local_max
 
 from config import CONFIG
 
-# YOLO is optional
-try:
-    from ultralytics import YOLO  # type: ignore
-except Exception:
-    YOLO = None  # type: ignore
 
-import httpx
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", module="torch.serialization")
 
 
-# =============================================================================
-# RUNTIME: Gateway URL (set by ai_server/main.py when starting mode)
-# =============================================================================
 def normalize_any_http(input_value: str) -> str:
     raw = (input_value or "").strip()
     if not raw:
@@ -56,16 +44,22 @@ def normalize_any_http(input_value: str) -> str:
 
 
 GATEWAY_URL = normalize_any_http(os.environ.get("GATEWAY_URL", ""))
+PPC = CONFIG.pick_and_place
 
-PPC = CONFIG.pick_and_place  # shorthand
+YOLO = None  # global default
 
-
+if PPC.yolo_mode:
+    try:
+        from ultralytics import YOLO  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "yolo_mode=True but ultralytics is not installed. "
+            "Install with: pip install ultralytics"
+        ) from e
 # =============================================================================
-# GGCNN import
+# GGCNN import (keep your structure)
 # =============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# You had this structure before; keep it
 import models.ggcnn2  # noqa: E402
 from models.ggcnn2 import GGCNN2  # noqa: E402
 
@@ -98,7 +92,6 @@ class GatewayApi:
     def _url(self, path: str) -> str:
         return self.base + path
 
-    # ---- Status
     def status(self) -> Dict[str, Any]:
         r = self.client.get(self._url("/api/status"))
         r.raise_for_status()
@@ -109,35 +102,31 @@ class GatewayApi:
         return self._url(PPC.stream_path)
 
     def ensure_camera_started(self) -> None:
-        # camera_autostart may already handle this, but it's safe.
         try:
             st = self.status()
             started = bool(st.get("cameras", {}).get("realsense", {}).get("started"))
             if not started:
                 self.client.post(self._url("/api/cameras/realsense/start"))
         except Exception:
-            # don't hard fail here
             pass
 
     def get_grasp_pack(self, x: int, y: int, crop_size: int) -> Dict[str, Any]:
         payload = {"x": int(x), "y": int(y), "crop_size": int(crop_size)}
         r = self.client.post(self._url(PPC.grasp_pack_path), json=payload)
-        # gateway returns 503 if not ready; keep that behavior
         if r.status_code != 200:
             return {"valid": False, "message": f"gateway grasp_pack http={r.status_code}", "raw": _safe_json(r)}
         return r.json()
 
-    # ---- Robot (minimum)
+    # ---- Robot
     def robot_enable(self) -> None:
         self.client.post(self._url(PPC.robot_enable_path))
-
-    def robot_home(self) -> None:
-        self.client.post(self._url(PPC.robot_home_path))
 
     def robot_stop(self) -> None:
         self.client.post(self._url(PPC.robot_stop_path))
 
-    # ---- Robot absolute pose move (REQUIRED)
+    def robot_home(self) -> None:
+        self.client.post(self._url(PPC.robot_home_path))
+
     def robot_move_pose(
         self,
         x: float,
@@ -149,21 +138,6 @@ class GatewayApi:
         speed: int,
         wait: bool = True,
     ) -> Tuple[bool, str]:
-        """
-        The original script requires absolute pose moves.
-
-        Gateway MUST provide one of these:
-          POST /api/robot/move_pose
-          POST /api/robot/pose
-
-        Body example:
-          {
-            "x": 123.4, "y": 0.2, "z": 400.0,
-            "roll": -180, "pitch": 0, "yaw": 0,
-            "speed": 120,
-            "wait": true
-          }
-        """
         body = {
             "x": float(x),
             "y": float(y),
@@ -174,20 +148,16 @@ class GatewayApi:
             "speed": int(speed),
             "wait": bool(wait),
         }
+        path = PPC.robot_move_pose_path
+        try:
+            r = self.client.post(self._url(path), json=body)
+            if r.status_code == 200:
+                return True, "OK"
+            return False, f"{path} http={r.status_code} {_safe_json(r)}"
+        except Exception as e:
+            return False, f"{path} error: {e}"
 
-        last_err = ""
-        for path in PPC.robot_move_pose_paths:
-            try:
-                r = self.client.post(self._url(path), json=body)
-                if r.status_code == 200:
-                    return True, "OK"
-                last_err = f"{path} http={r.status_code} {_safe_json(r)}"
-            except Exception as e:
-                last_err = f"{path} error: {e}"
-
-        return False, f"Gateway has no absolute pose endpoint. Last error: {last_err}"
-
-    # ---- Gripper (Gateway has jog open/close)
+    # ---- Gripper
     def gripper_status(self) -> Dict[str, Any]:
         r = self.client.get(self._url(PPC.gripper_status_path))
         if r.status_code != 200:
@@ -215,8 +185,7 @@ def safe_z(z: float) -> float:
 
 
 def normalize_deg(a: float) -> float:
-    a = (a + 180.0) % 360.0 - 180.0
-    return a
+    return (a + 180.0) % 360.0 - 180.0
 
 
 def load_homography() -> Optional[np.ndarray]:
@@ -238,45 +207,22 @@ def project_xy(H: np.ndarray, u: float, v: float) -> Tuple[float, float]:
     return float(q[0]), float(q[1])
 
 
-def ensure_gripper_position(gw: GatewayApi, target: int, tolerance: int = 20, max_steps: int = 60) -> None:
-    """
-    Gateway currently supports jog (open|close) stepwise.
-    We approximate target by jogging until close enough.
-    """
-    for _ in range(max_steps):
-        st = gw.gripper_status()
-        if not st.get("available"):
-            return
-
-        pos = st.get("pos")
-        if pos is None:
-            # can't read; just do a few steps and return
-            if target <= PPC.gripper_closed_pos:
-                gw.gripper_jog("close")
-            else:
-                gw.gripper_jog("open")
-            time.sleep(0.03)
-            continue
-
-        pos_i = int(pos)
-        if abs(pos_i - int(target)) <= tolerance:
-            return
-
-        if pos_i < target:
-            gw.gripper_jog("open")
-        else:
-            gw.gripper_jog("close")
-
-        time.sleep(0.03)
-
-
-def go_vision_pose(gw: GatewayApi) -> None:
-    # ensure enabled (your gateway may auto-enable; but safe)
+def recover_robot(gw: GatewayApi) -> None:
+    try:
+        gw.robot_stop()
+    except Exception:
+        pass
     try:
         gw.robot_enable()
     except Exception:
         pass
 
+
+def go_vision_pose(gw: GatewayApi) -> None:
+    try:
+        gw.robot_enable()
+    except Exception:
+        pass
     ok, msg = gw.robot_move_pose(
         x=PPC.vision_x,
         y=PPC.vision_y,
@@ -291,20 +237,47 @@ def go_vision_pose(gw: GatewayApi) -> None:
         raise RuntimeError(msg)
 
 
-def recover_robot(gw: GatewayApi) -> None:
+def ensure_gripper_position(gw: GatewayApi, target: int) -> None:
     """
-    Gateway-side equivalent of recover_if_error:
-    - enable again
-    - stop (optional)
+    Gateway jog open/close until close enough (if position is readable).
     """
-    try:
-        gw.robot_stop()
-    except Exception:
-        pass
-    try:
-        gw.robot_enable()
-    except Exception:
-        pass
+    for _ in range(int(PPC.gripper_max_steps)):
+        st = gw.gripper_status()
+        if not st.get("available"):
+            # no feedback; do one jog and stop
+            gw.gripper_jog("close" if target <= PPC.gripper_closed_pos else "open")
+            time.sleep(float(PPC.gripper_step_sleep_s))
+            return
+
+        pos = st.get("pos")
+        if pos is None:
+            gw.gripper_jog("close" if target <= PPC.gripper_closed_pos else "open")
+            time.sleep(float(PPC.gripper_step_sleep_s))
+            continue
+
+        pos_i = int(pos)
+        if abs(pos_i - int(target)) <= int(PPC.gripper_tolerance):
+            return
+
+        gw.gripper_jog("open" if pos_i < target else "close")
+        time.sleep(float(PPC.gripper_step_sleep_s))
+
+
+def is_grasp_likely(gw: GatewayApi) -> Optional[bool]:
+    """
+    Heuristic:
+      - After closing, if gripper can't fully reach closed_pos and stays more open
+        than (closed_pos + grasped_pos_delta), likely object is between fingers.
+    Returns None if no feedback.
+    """
+    st = gw.gripper_status()
+    if not st.get("available"):
+        return None
+    pos = st.get("pos")
+    if pos is None:
+        return None
+    pos_i = int(pos)
+    return pos_i >= int(PPC.gripper_closed_pos + PPC.grasped_pos_delta)
 
 
 # =============================================================================
@@ -334,23 +307,16 @@ def process_depth_image(depth_m: np.ndarray, out_size: int = 300):
 
 
 def load_ggcnn_model():
-    # Prefer CUDA if available, else CPU
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight_path = os.path.join(SCRIPT_DIR, PPC.ggcnn_weight_path)
 
-    # allow custom module class for torch.load
     torch.serialization.add_safe_globals([GGCNN2])
-
     model = torch.load(weight_path, map_location=device, weights_only=False)
     model.to(device).eval()
     return model, device
 
 
-def ggcnn_infer(depth_crop_m: np.ndarray, model, device, out_size: int = 300):
+def ggcnn_infer(depth_crop_m: np.ndarray, model, device, out_size: int):
     global prev_mp
 
     depth_proc, invalid_mask = process_depth_image(depth_crop_m, out_size)
@@ -406,8 +372,8 @@ def ggcnn_infer(depth_crop_m: np.ndarray, model, device, out_size: int = 300):
         )
 
     return {
-        "best_u_300": int(prev_mp[1]),
-        "best_v_300": int(prev_mp[0]),
+        "best_u": int(prev_mp[1]),
+        "best_v": int(prev_mp[0]),
         "angle_deg": float(angle_deg),
         "debug_img": debug_img,
     }
@@ -424,84 +390,131 @@ def mouse_callback(event, x, y, flags, param):
 
 
 # =============================================================================
-# ROBOT ACTION THREAD (via gateway)
+# ROBOT ACTION (via gateway)
 # =============================================================================
 def perform_pick_or_place(gw: GatewayApi, x: float, y: float, z: float, yaw_deg: float, action: str):
+    """
+    Guarantees: if configured, always returns to vision pose even on cancel/error.
+    """
     global robot_state
+    cancelled = False
     try:
         robot_state = "MOVING"
         recover_robot(gw)
 
+        # Always clamp
         z = safe_z(z)
 
-        # Move XY at VISION_Z (camera-stable)
-        ok, msg = gw.robot_move_pose(
-            x=x,
-            y=y,
-            z=PPC.vision_z,
-            roll=PPC.vision_roll,
-            pitch=PPC.vision_pitch,
-            yaw=yaw_deg,
-            speed=PPC.speed_move,
-            wait=True,
+        # Move XY at vision_z
+        ok, _ = gw.robot_move_pose(
+            x=x, y=y, z=PPC.vision_z,
+            roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
+            speed=PPC.speed_move, wait=True
         )
         if not ok:
+            cancelled = True
             robot_state = "WAIT_TO_PICK"
+            return
+
+        if PPC.dry_run_xy_only:
+            # Only XY move, no descend
+            robot_state = "WAIT_TO_PLACE" if action == "PICK" else "WAIT_TO_PICK"
             return
 
         drop = float(PPC.vision_z) - float(z)
         if drop > float(PPC.max_drop_mm):
-            robot_state = "WAIT_TO_PICK" if action == "PLACE" else "WAIT_TO_PLACE"
-            try:
-                go_vision_pose(gw)
-            except Exception:
-                pass
+            cancelled = True
+            robot_state = "WAIT_TO_PLACE" if action == "PICK" else "WAIT_TO_PICK"
             return
 
-        # Descend slowly (absolute z)
+        # Descend
         ok, _ = gw.robot_move_pose(
-            x=x,
-            y=y,
-            z=z,
-            roll=PPC.vision_roll,
-            pitch=PPC.vision_pitch,
-            yaw=yaw_deg,
-            speed=PPC.speed_descend,
-            wait=True,
+            x=x, y=y, z=z,
+            roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
+            speed=PPC.speed_descend, wait=True
         )
         if not ok:
+            cancelled = True
             robot_state = "WAIT_TO_PICK"
             return
 
         if action == "PICK":
             ensure_gripper_position(gw, PPC.gripper_closed_pos)
             time.sleep(0.2)
-            # Ascend
+            # Ascend back
             gw.robot_move_pose(
                 x=x, y=y, z=PPC.vision_z,
                 roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
-                speed=PPC.speed_ascend, wait=True,
+                speed=PPC.speed_ascend, wait=True
             )
             robot_state = "WAIT_TO_PLACE"
         else:
             ensure_gripper_position(gw, PPC.gripper_open_pos)
             time.sleep(0.2)
-            # Ascend
             gw.robot_move_pose(
                 x=x, y=y, z=PPC.vision_z,
                 roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
-                speed=PPC.speed_ascend, wait=True,
+                speed=PPC.speed_ascend, wait=True
             )
             robot_state = "WAIT_TO_PICK"
 
-        go_vision_pose(gw)
-
     except Exception:
+        cancelled = True
         robot_state = "WAIT_TO_PICK"
+    finally:
+        # This is the key fix: ALWAYS return to standard pose
         try:
-            go_vision_pose(gw)
+            if cancelled and not PPC.return_to_vision_pose_on_cancel:
+                return
+            if (not cancelled) and not PPC.return_to_vision_pose_after_action:
+                return
+            if cancelled and PPC.return_to_vision_pose_on_error:
+                go_vision_pose(gw)
+            elif not cancelled and PPC.return_to_vision_pose_after_action:
+                go_vision_pose(gw)
         except Exception:
             pass
+
+
+def pick_attempts_thread(gw: GatewayApi, tx: float, ty: float, yaw_target: float, pick_z_base: float):
+    """
+    Multiple attempts:
+      - step down
+      - close gripper
+      - (optional) verify grasp via gripper position heuristic
+      - if not grasped: open and try lower
+    """
+    global robot_state
+
+    for attempt in range(int(PPC.pick_attempts)):
+        tz = safe_z(pick_z_base - float(attempt) * float(PPC.pick_step_down_mm))
+
+        perform_pick_or_place(gw, tx, ty, tz, yaw_target, "PICK")
+
+        if not PPC.verify_grasp_via_gripper:
+            return
+
+        # Verify after PICK: if robot_state is WAIT_TO_PLACE, check if grasp likely.
+        if robot_state != "WAIT_TO_PLACE":
+            # something went wrong; stop attempts
+            return
+
+        likely = is_grasp_likely(gw)
+        if likely is None:
+            # no feedback; accept
+            return
+
+        if likely:
+            # grasp ok
+            return
+
+        # Not grasped -> open and retry lower
+        ensure_gripper_position(gw, PPC.gripper_open_pos)
+        time.sleep(0.15)
+        robot_state = "WAIT_TO_PICK"
+
+    # attempts done; ensure state is consistent
+    robot_state = "WAIT_TO_PICK"
 
 
 # =============================================================================
@@ -511,14 +524,11 @@ def main():
     global click_target, robot_state, last_debug_img
 
     if not GATEWAY_URL:
-        raise RuntimeError("GATEWAY_URL is empty. This mode must be started by ai_server/main.py with gateway_url.")
+        raise RuntimeError("GATEWAY_URL is empty. Start this mode via ai_server/main.py with gateway_url.")
 
     gw = GatewayApi(GATEWAY_URL, timeout_s=float(PPC.http_timeout_s))
-
-    # Ensure camera started (optional)
     gw.ensure_camera_started()
 
-    # Load models
     ggcnn_model, device = load_ggcnn_model()
     H = load_homography()
 
@@ -528,21 +538,17 @@ def main():
             raise RuntimeError("yolo_mode=True but ultralytics is not available.")
         yolo = YOLO(PPC.yolo_model_name)
 
-    # Robot: go to vision pose
+    # Go standard pose first
     go_vision_pose(gw)
 
-    # OpenCV stream
     stream_url = gw.stream_url()
     cap = cv2.VideoCapture(stream_url)
 
-    win = PPC.window_name
-    cv2.namedWindow(win)
-    cv2.setMouseCallback(win, mouse_callback)
-
+    cv2.namedWindow(PPC.window_name)
+    cv2.setMouseCallback(PPC.window_name, mouse_callback)
     if PPC.debug_mode:
         cv2.namedWindow(PPC.debug_window_name)
 
-    # Derived pick/place Z
     pick_z_base = float(PPC.table_z_mm + PPC.pick_clearance_mm)
     place_z = float(PPC.place_z_mm) if PPC.place_z_mm is not None else float(PPC.table_z_mm + PPC.place_clearance_mm)
 
@@ -554,7 +560,6 @@ def main():
             continue
 
         show = frame
-
         results = None
         if PPC.yolo_mode and yolo is not None:
             results = yolo(frame, verbose=False)
@@ -563,11 +568,11 @@ def main():
             cx, cy = click_target
             click_target = None
 
-            # Stabilize view before requesting depth crop
+            # Stabilize view
             go_vision_pose(gw)
             time.sleep(float(PPC.stabilize_sleep_s))
 
-            # Optional validation (PICK only)
+            # YOLO validation (PICK only) -- FIXED: invalid => continue
             if PPC.yolo_mode and robot_state == "WAIT_TO_PICK":
                 valid = False
                 if results is None:
@@ -579,11 +584,7 @@ def main():
                             valid = True
                             break
                 if not valid:
-                    # no overlay; ignore click
-                    pass
-                else:
-                    # proceed
-                    pass
+                    continue
 
             try:
                 pack = gw.get_grasp_pack(int(cx), int(cy), int(PPC.crop_size))
@@ -597,28 +598,25 @@ def main():
                 depth_u16 = cv2.imdecode(np.frombuffer(depth_png, np.uint8), cv2.IMREAD_ANYDEPTH)
                 if depth_u16 is None:
                     continue
-
                 depth_crop_m = depth_u16.astype(np.float32) * depth_scale
 
                 g = ggcnn_infer(depth_crop_m, ggcnn_model, device, out_size=int(PPC.crop_size))
                 if g is None:
                     continue
-
                 if g["debug_img"] is not None:
                     last_debug_img = g["debug_img"]
 
                 crop_h, crop_w = depth_u16.shape[:2]
-                u_in_crop = int(g["best_u_300"] / float(PPC.crop_size) * crop_w)
-                v_in_crop = int(g["best_v_300"] / float(PPC.crop_size) * crop_h)
+                u_in_crop = int(g["best_u"] / float(PPC.crop_size) * crop_w)
+                v_in_crop = int(g["best_v"] / float(PPC.crop_size) * crop_h)
 
                 u_full = int(origin["x"] + u_in_crop)
                 v_full = int(origin["y"] + v_in_crop)
 
-                # XY via homography
                 if H is None:
                     H = load_homography()
                 if H is None:
-                    continue  # safer
+                    continue
 
                 tx, ty = project_xy(H, u_full, v_full)
 
@@ -631,29 +629,25 @@ def main():
                     )
 
                 if action == "PLACE":
-                    tz = place_z
                     th = threading.Thread(
                         target=perform_pick_or_place,
-                        args=(gw, tx, ty, tz, yaw_target, "PLACE"),
+                        args=(gw, tx, ty, place_z, yaw_target, "PLACE"),
                         daemon=True,
                     )
                     th.start()
                 else:
-                    def pick_attempts():
-                        # step-down attempts (sequential)
-                        for attempt in range(int(PPC.pick_attempts)):
-                            tz = safe_z(pick_z_base - float(attempt) * float(PPC.pick_step_down_mm))
-                            perform_pick_or_place(gw, tx, ty, tz, yaw_target, "PICK")
-                            break
-
-                    th = threading.Thread(target=pick_attempts, daemon=True)
+                    th = threading.Thread(
+                        target=pick_attempts_thread,
+                        args=(gw, tx, ty, yaw_target, pick_z_base),
+                        daemon=True,
+                    )
                     th.start()
 
             except Exception:
                 recover_robot(gw)
                 robot_state = "WAIT_TO_PICK"
 
-        cv2.imshow(win, show)
+        cv2.imshow(PPC.window_name, show)
         if PPC.debug_mode:
             cv2.imshow(PPC.debug_window_name, last_debug_img)
 

@@ -12,7 +12,7 @@ class PickAndPlaceConfig:
     stream_path: str = "/api/cameras/realsense/stream/mjpeg"
     grasp_pack_path: str = "/api/cameras/realsense/get_grasp_pack"
 
-    # Required robot endpoints (absolute pose)
+    # Robot endpoints (absolute pose)
     robot_move_pose_path: str = "/api/robot/move_pose"
     robot_enable_path: str = "/api/robot/enable"
     robot_stop_path: str = "/api/robot/stop"
@@ -28,6 +28,12 @@ class PickAndPlaceConfig:
     yolo_mode: bool = False
     debug_mode: bool = True
     reload_h_on_key: bool = True
+
+    # Safety / behavior toggles
+    dry_run_xy_only: bool = False  # True => never descend, only XY at vision_z
+    return_to_vision_pose_after_action: bool = True  # ALWAYS go back after pick/place
+    return_to_vision_pose_on_cancel: bool = True     # also go back if cancel happens
+    return_to_vision_pose_on_error: bool = True      # also go back on exceptions
 
     # Models
     yolo_model_name: str = "models/yolo26x-seg.pt"
@@ -62,9 +68,18 @@ class PickAndPlaceConfig:
     speed_descend: int = 28
     speed_ascend: int = 90
 
-    # Gripper (targets; gateway is jog-based)
+    # Gripper (gateway is jog-based; these are targets)
     gripper_open_pos: int = 850
     gripper_closed_pos: int = 0
+
+    # Optional: verify grasp via gripper position feedback
+    verify_grasp_via_gripper: bool = True
+    # Heuristic: after closing, if actual position stays ABOVE closed_pos by this much,
+    # it likely means an object blocks the gripper => grasped.
+    grasped_pos_delta: int = 60
+    gripper_tolerance: int = 20
+    gripper_max_steps: int = 80
+    gripper_step_sleep_s: float = 0.03
 
     # Auto yaw
     enable_auto_yaw: bool = False
@@ -73,6 +88,10 @@ class PickAndPlaceConfig:
 
     # Network
     http_timeout_s: float = 3.0
+
+    # UI
+    window_name: str = "pick_and_place"
+    debug_window_name: str = "debug"
 
 
 @dataclass(frozen=True)
