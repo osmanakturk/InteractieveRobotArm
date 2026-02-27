@@ -50,12 +50,10 @@ class AppConfig:
     rs_fps: int = 30
 
     mjpeg_quality: int = 80
-    yolo_model_path: str = "models/yolo26n-seg.engine"
 
-    depth_kernel: int = 5  # must be odd
-    overlay_alpha: float = 0.4
+    camera_autostart: bool = True
+    robot_autostart: bool = True
 
-    camera_autostart: bool = False
 
 
 CONFIG = AppConfig()

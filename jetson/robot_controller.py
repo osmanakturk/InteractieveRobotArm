@@ -1,4 +1,3 @@
-# jetson/robot_controller.py
 from __future__ import annotations
 
 import threading
@@ -130,7 +129,6 @@ class RobotController:
     def _check_limits(self, target_pose: list) -> Tuple[bool, str]:
         x, y, z, roll, pitch, yaw = target_pose[:6]
 
-        # only limited if that min/max is set
         if not self._in_range(x, CONFIG.safety_x_min_mm, CONFIG.safety_x_max_mm):
             return False, "Safety limit reached on X axis."
         if not self._in_range(y, CONFIG.safety_y_min_mm, CONFIG.safety_y_max_mm):
@@ -191,6 +189,12 @@ class RobotController:
     # Connection
     # -------------------------
     def connect(self, ip: str) -> Tuple[bool, str]:
+        """
+        Connect to robot.
+        If CONFIG.robot_autostart is True => auto enable after connect.
+        Connect will still return success even if auto-enable fails (it returns a warning message).
+        """
+        # ---- connect under lock ----
         with self._lock:
             if XArmAPI is None:
                 return False, "xArm SDK not installed (pip install xarm-python-sdk)."
@@ -214,7 +218,7 @@ class RobotController:
                 except Exception:
                     pass
 
-                # safe defaults (DO NOT auto-enable)
+                # safe defaults
                 try:
                     self._arm.set_mode(0)
                 except Exception:
@@ -235,12 +239,25 @@ class RobotController:
                 self._refresh_gripper_cache()
                 self.clear_safety()
 
-                self._enabled_flag = False  # must press Enable explicitly
-                return True, "Connected."
+                # default disabled unless enabled explicitly/auto
+                self._enabled_flag = False
+
+                # read flag while locked (no config race)
+                do_autostart = bool(getattr(CONFIG, "robot_autostart", False))
+
             except Exception as e:
                 self._arm = None
                 self._enabled_flag = False
                 return False, f"Connect failed: {e}"
+
+        # ---- IMPORTANT: do enable OUTSIDE lock (avoid deadlock, since enable() also locks) ----
+        if do_autostart:
+            ok_en, msg_en = self.enable()
+            if ok_en:
+                return True, "Connected + auto-enabled."
+            return True, f"Connected, but auto-enable failed: {msg_en}"
+
+        return True, "Connected."
 
     def disconnect(self) -> Tuple[bool, str]:
         with self._lock:
@@ -367,23 +384,17 @@ class RobotController:
     def jog_delta(
         self, dx=0.0, dy=0.0, dz=0.0, droll=0.0, dpitch=0.0, dyaw=0.0
     ) -> Tuple[bool, str, bool]:
-        """
-        Returns: (success, message, throttled)
-        throttled=True => server-side rate-limit triggered (429)
-        """
         with self._lock:
             ok, msg = self._is_motion_allowed()
             if not ok:
                 return False, msg, False
 
-            # throttle
             now = time.monotonic()
             min_dt = max(0.0, float(CONFIG.jog_min_interval_ms) / 1000.0)
             if min_dt > 0 and (now - self._last_jog_ts) < min_dt:
                 return False, "Jog throttled (too fast).", True
             self._last_jog_ts = now
 
-            # safety check
             pose = self._get_pose()
             if pose is not None and len(pose) >= 6:
                 target = [
@@ -484,10 +495,16 @@ class RobotController:
                 denom = max(1, CONFIG.gripper_max - CONFIG.gripper_min)
                 pct = int(round((pos - CONFIG.gripper_min) * 100.0 / denom))
                 pct = max(0, min(100, pct))
-            return {"available": self._gripper_available, "pos": pos, "pct": pct, "min": CONFIG.gripper_min, "max": CONFIG.gripper_max}
+            return {
+                "available": self._gripper_available,
+                "pos": pos,
+                "pct": pct,
+                "min": CONFIG.gripper_min,
+                "max": CONFIG.gripper_max,
+            }
 
     # -------------------------
-    # Status (NO motion checks here!)
+    # Status
     # -------------------------
     def status(self) -> Dict[str, Any]:
         with self._lock:
