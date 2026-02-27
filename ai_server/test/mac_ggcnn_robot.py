@@ -29,12 +29,12 @@ from models.ggcnn2 import GGCNN2
 # --- CONFIGURATION ---
 # ==============================================================================
 DEBUG_MODE = True                    # Shows the GGCNN Heatmap window
-YOLO_MODEL_NAME = "yolo26s-seg.pt"   # Selected YOLO model
+YOLO_MODEL_NAME = "models/yolo26x-seg.pt"   # Selected YOLO model
 
-CAMERA_SERVER_IP = "192.168.1.20"   
+CAMERA_SERVER_IP = "10.2.172.118"   
 STREAM_URL = f"http://{CAMERA_SERVER_IP}:8000/video_feed"
 API_URL = f"http://{CAMERA_SERVER_IP}:8000/api/get_grasp_data"
-ROBOT_IP = "192.168.1.30"
+ROBOT_IP = "10.2.172.20"
 
 # --- EYE-IN-HAND OFFSETS & KINEMATICS ---
 CAMERA_OFFSET_X = 0.0  
