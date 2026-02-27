@@ -17,9 +17,11 @@ class AppConfig:
     gripper_max: int = 850
     gripper_step: int = 30
 
+    # If True: after connect(), gateway will auto-enable robot (motion_enable)
+    robot_autostart_enable: bool = True
+
     # ----------------
     # SAFETY LIMITS (None => no limit)
-    # Only set what you need; others stay unlimited.
     # ----------------
     safety_x_min_mm: Optional[float] = None
     safety_x_max_mm: Optional[float] = None
@@ -37,8 +39,6 @@ class AppConfig:
 
     # ----------------
     # Rate limiting / jog throttle (server-side)
-    # If /api/jog comes faster than this, return 429.
-    # Recommended: 80..120ms
     # ----------------
     jog_min_interval_ms: int = 100
 
@@ -51,9 +51,8 @@ class AppConfig:
 
     mjpeg_quality: int = 80
 
+    # If True: streamer opens automatically on init
     camera_autostart: bool = True
-    robot_autostart: bool = True
-
 
 
 CONFIG = AppConfig()

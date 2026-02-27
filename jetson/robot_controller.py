@@ -1,3 +1,4 @@
+# jetson/robot_controller.py
 from __future__ import annotations
 
 import threading
@@ -49,14 +50,11 @@ class RobotController:
         self._safety_limit_hit: bool = False
         self._safety_message: str = ""
 
-        # server-side jog throttle
         self._last_jog_ts: float = 0.0
-
-        # authoritative enabled flag (we control it)
         self._enabled_flag: bool = False
 
     # -------------------------
-    # Low-level hardware snapshot (NO recursion)
+    # Low-level hardware snapshot
     # -------------------------
     def _read_hw(self) -> Dict[str, Optional[int]]:
         if self._arm is None:
@@ -112,20 +110,6 @@ class RobotController:
             return False
         return True
 
-    def _get_pose(self) -> Optional[list]:
-        if self._arm is None:
-            return None
-        try:
-            out = self._arm.get_position(is_radian=False)
-            if isinstance(out, tuple) and len(out) == 2:
-                code, pose = out
-                if code == 0:
-                    return [float(v) for v in pose]
-            else:
-                return [float(v) for v in out]
-        except Exception:
-            return None
-
     def _check_limits(self, target_pose: list) -> Tuple[bool, str]:
         x, y, z, roll, pitch, yaw = target_pose[:6]
 
@@ -166,7 +150,7 @@ class RobotController:
         self._set_safety_hit(reason + " Robot was disabled for safety. Press Enable again to continue.")
 
     # -------------------------
-    # Motion gate (NO recursion!)
+    # Motion gate
     # -------------------------
     def _is_motion_allowed(self) -> Tuple[bool, str]:
         if self._arm is None:
@@ -189,17 +173,10 @@ class RobotController:
     # Connection
     # -------------------------
     def connect(self, ip: str) -> Tuple[bool, str]:
-        """
-        Connect to robot.
-        If CONFIG.robot_autostart is True => auto enable after connect.
-        Connect will still return success even if auto-enable fails (it returns a warning message).
-        """
-        # ---- connect under lock ----
         with self._lock:
             if XArmAPI is None:
                 return False, "xArm SDK not installed (pip install xarm-python-sdk)."
 
-            # reset existing
             if self._arm is not None:
                 try:
                     self._arm.disconnect()
@@ -218,7 +195,6 @@ class RobotController:
                 except Exception:
                     pass
 
-                # safe defaults
                 try:
                     self._arm.set_mode(0)
                 except Exception:
@@ -239,25 +215,20 @@ class RobotController:
                 self._refresh_gripper_cache()
                 self.clear_safety()
 
-                # default disabled unless enabled explicitly/auto
                 self._enabled_flag = False
 
-                # read flag while locked (no config race)
-                do_autostart = bool(getattr(CONFIG, "robot_autostart", False))
+                # optional auto-enable
+                if bool(getattr(CONFIG, "robot_autostart_enable", False)):
+                    ok_en, msg_en = self.enable()
+                    if not ok_en:
+                        return True, f"Connected. Auto-enable failed: {msg_en}"
+                    return True, "Connected. Auto-enabled."
 
+                return True, "Connected."
             except Exception as e:
                 self._arm = None
                 self._enabled_flag = False
                 return False, f"Connect failed: {e}"
-
-        # ---- IMPORTANT: do enable OUTSIDE lock (avoid deadlock, since enable() also locks) ----
-        if do_autostart:
-            ok_en, msg_en = self.enable()
-            if ok_en:
-                return True, "Connected + auto-enabled."
-            return True, f"Connected, but auto-enable failed: {msg_en}"
-
-        return True, "Connected."
 
     def disconnect(self) -> Tuple[bool, str]:
         with self._lock:
@@ -357,6 +328,56 @@ class RobotController:
                 return False, f"Home failed: {e}"
 
     # -------------------------
+    # NEW: Absolute pose move for pick&place
+    # -------------------------
+    def move_pose(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        speed: int = 120,
+        wait: bool = True,
+    ) -> Tuple[bool, str]:
+        with self._lock:
+            ok, msg = self._is_motion_allowed()
+            if not ok:
+                return False, msg
+
+            target = [float(x), float(y), float(z), float(roll), float(pitch), float(yaw)]
+            ok2, reason = self._check_limits(target)
+            if not ok2:
+                self._force_disable_for_safety(reason)
+                return False, self._safety_message
+
+            # speed/mvacc: keep consistent scaling style
+            spd = int(max(1, speed))
+            mvacc = max(1, int(2000 * (self._speed_pct / 100.0)))
+
+            kwargs = dict(
+                x=float(x), y=float(y), z=float(z),
+                roll=float(roll), pitch=float(pitch), yaw=float(yaw),
+                relative=False, wait=bool(wait),
+                speed=spd, mvacc=mvacc, is_radian=False,
+            )
+            kwargs["coordinate_mode"] = 1 if self._frame == "tool" else 0
+
+            try:
+                try:
+                    code = self._arm.set_position(**kwargs)  # type: ignore[union-attr]
+                except TypeError:
+                    kwargs.pop("coordinate_mode", None)
+                    code = self._arm.set_position(**kwargs)  # type: ignore[union-attr]
+
+                if isinstance(code, int) and code != 0:
+                    return False, f"set_position failed code={code}"
+                return True, "OK"
+            except Exception as e:
+                return False, f"move_pose failed: {e}"
+
+    # -------------------------
     # Jog config
     # -------------------------
     def set_frame(self, frame: str) -> Tuple[bool, str]:
@@ -381,6 +402,20 @@ class RobotController:
     # -------------------------
     # Jog (server-side throttle + safety)
     # -------------------------
+    def _get_pose(self) -> Optional[list]:
+        if self._arm is None:
+            return None
+        try:
+            out = self._arm.get_position(is_radian=False)
+            if isinstance(out, tuple) and len(out) == 2:
+                code, pose = out
+                if code == 0:
+                    return [float(v) for v in pose]
+            else:
+                return [float(v) for v in out]
+        except Exception:
+            return None
+
     def jog_delta(
         self, dx=0.0, dy=0.0, dz=0.0, droll=0.0, dpitch=0.0, dyaw=0.0
     ) -> Tuple[bool, str, bool]:
