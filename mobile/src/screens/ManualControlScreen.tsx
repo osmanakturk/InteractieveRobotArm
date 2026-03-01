@@ -527,6 +527,11 @@ export default function ManualControlScreen({ navigation, route }: any) {
     navigation.navigate("ConnectionHub");
   }, [navigation]);
 
+    const goModeSelect = useCallback(() => {
+    navigation.navigate("ModeSelect");
+  }, [navigation]);
+
+
   // Layout
   const leftW = useMemo(() => clamp(Math.round(width * 0.28), 240, 310), [width]);
   const rightW = useMemo(() => clamp(Math.round(width * 0.28), 260, 360), [width]);
@@ -563,7 +568,7 @@ export default function ManualControlScreen({ navigation, route }: any) {
   const robotBtnTone = enabled ? "danger" : "success";
 
   const camBtnLabel = cameraStarted ? "Cam-Off" : "Cam-On";
-  const camBtnIcon = cameraStarted ? "cctv" : "cctv-off";
+  const camBtnIcon = cameraStarted ? "cctv-off" : "cctv";
   const camBtnTone = cameraStarted ? "danger" : "success";
 
   const onCameraToggle = () => {
@@ -841,6 +846,17 @@ export default function ManualControlScreen({ navigation, route }: any) {
                   </Text>
                   {!!aiserver.message && <Text style={styles.drawerHint}>{aiserver.message}</Text>}
                 </View>
+
+                <Pressable
+                  onPress={() => {
+                    setLeftOpen(false);
+                    goModeSelect();
+                  }}
+                  style={({ pressed }) => [styles.hubLink, pressed ? { opacity: 0.9 } : null]}
+                >
+                  <MaterialCommunityIcons name="link-variant" size={18} color="white" />
+                  <Text style={styles.hubLinkText}>Go to Mode Selection</Text>
+                </Pressable>
 
                 <Pressable
                   onPress={() => {
