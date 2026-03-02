@@ -32,6 +32,8 @@ type Selection = {
   selectionId?: string;
 };
 
+type WorkflowPhase = "idle" | "pick_armed" | "place_armed" | "busy";
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
@@ -179,17 +181,14 @@ function mapTapToNormalizedContain(
 ): { u: number; v: number } | null {
   if (viewW <= 0 || viewH <= 0) return null;
 
-  // displayed image size inside the container with contain behavior
   const viewAspect = viewW / viewH;
 
   let dispW = viewW;
   let dispH = viewH;
   if (viewAspect > imgAspect) {
-    // container is wider -> letterbox left/right
     dispH = viewH;
     dispW = dispH * imgAspect;
   } else {
-    // container is taller -> letterbox top/bottom
     dispW = viewW;
     dispH = dispW / imgAspect;
   }
@@ -197,7 +196,6 @@ function mapTapToNormalizedContain(
   const offsetX = (viewW - dispW) / 2;
   const offsetY = (viewH - dispH) / 2;
 
-  // ignore taps in the letterbox area
   if (tapX < offsetX || tapX > offsetX + dispW || tapY < offsetY || tapY > offsetY + dispH) {
     return null;
   }
@@ -215,7 +213,10 @@ export default function PickPlaceScreen({ navigation, route }: any) {
   const { gateway, robot, aiserver, live, wsConnected } = useConnection();
 
   const gatewayFromParams: string = route?.params?.gateway || route?.params?.baseUrl || "";
-  const gatewayBase = useMemo(() => normalizeBaseUrl(gateway.value || gatewayFromParams), [gateway.value, gatewayFromParams]);
+  const gatewayBase = useMemo(
+    () => normalizeBaseUrl(gateway.value || gatewayFromParams),
+    [gateway.value, gatewayFromParams]
+  );
 
   const aiBase = useMemo(() => normalizeBaseUrl(aiserver.value || ""), [aiserver.value]);
 
@@ -249,7 +250,6 @@ export default function PickPlaceScreen({ navigation, route }: any) {
   // --- ADD near other refs/state ---
   const forceJogUnlockedUntilRef = useRef<number>(0);
 
-  // helper
   function nowMs() {
     return Date.now();
   }
@@ -257,9 +257,13 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     return nowMs() < (forceJogUnlockedUntilRef.current || 0);
   }
 
+  // Pick/Place workflow state (NEW)
+  const [phase, setPhase] = useState<WorkflowPhase>("idle");
+  const [hasPicked, setHasPicked] = useState(false);
+
   // Object selection state
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [selecting, setSelecting] = useState(false); // small UX lock while posting
+  const [selecting, setSelecting] = useState(false);
   const cameraLayout = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
   // hold-to-jog loop
@@ -280,7 +284,15 @@ export default function PickPlaceScreen({ navigation, route }: any) {
 
   const aiConnected = !!(live as any)?.ai_server?.connected;
   const aiConfigured = !!(live as any)?.ai_server?.configured;
-  const aiDot: DotStatus = !gatewayBase ? "idle" : !gatewayUp ? "error" : aiConnected ? "connected" : aiConfigured ? "error" : "idle";
+  const aiDot: DotStatus = !gatewayBase
+    ? "idle"
+    : !gatewayUp
+      ? "error"
+      : aiConnected
+        ? "connected"
+        : aiConfigured
+          ? "error"
+          : "idle";
 
   // API helpers (Gateway)
   const apiPost = useCallback(
@@ -408,7 +420,9 @@ export default function PickPlaceScreen({ navigation, route }: any) {
       const data = await aiGet("/api/ai_server/modes/status");
       const active = data?.active_mode || {};
       setAiModeActive(!!active.active);
-      setAiModeExitCode(typeof active.exit_code === "number" ? active.exit_code : active.exit_code === null ? null : null);
+      setAiModeExitCode(
+        typeof active.exit_code === "number" ? active.exit_code : active.exit_code === null ? null : null
+      );
       setAiModeErr("");
     } catch (e: any) {
       setAiModeActive(false);
@@ -424,7 +438,6 @@ export default function PickPlaceScreen({ navigation, route }: any) {
       refreshGripperStatus();
       refreshAiStatus();
 
-      // cleanup: stop any running jog loop when screen blurs/unmounts
       return () => {
         jogAbort.current = true;
         if (jogTimer.current) clearTimeout(jogTimer.current);
@@ -433,12 +446,23 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     }, [refreshCameraStatus, refreshGripperStatus, refreshAiStatus])
   );
 
+  // If AI mode stops, reset workflow
   useEffect(() => {
     if (!aiModeActive) {
       setSelection(null);
+      setPhase("idle");
+      setHasPicked(false);
     }
   }, [aiModeActive]);
 
+  // If robot disconnects or disables, reset workflow
+  useEffect(() => {
+    if (!robotConnected || !enabled) {
+      setSelection(null);
+      setPhase("idle");
+      setHasPicked(false);
+    }
+  }, [robotConnected, enabled]);
 
   // WS gripper_pct update only when it changes
   const wsGripperPct = (live as any)?.status?.gripper_pct;
@@ -509,13 +533,16 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     [apiPost, refreshGripperStatus]
   );
 
-
   const onStop = useCallback(async () => {
-    // STOP should immediately kill any local jog loop
     endHoldJog();
 
     // allow jog after stop even if WS lags (e.g. 2 seconds)
     forceJogUnlockedUntilRef.current = Date.now() + 2000;
+
+    // also cancel workflow
+    setSelection(null);
+    setPhase("idle");
+    setHasPicked(false);
 
     try {
       await apiPost("/api/robot/stop");
@@ -523,6 +550,7 @@ export default function PickPlaceScreen({ navigation, route }: any) {
       Alert.alert("STOP failed", e?.message || "Stop failed.");
     }
   }, [apiPost, endHoldJog]);
+
   const onEnableDisable = useCallback(async () => {
     try {
       if (!gatewayBase) return Alert.alert("Gateway missing", "Please set Gateway in Connection Hub.");
@@ -646,7 +674,6 @@ export default function PickPlaceScreen({ navigation, route }: any) {
   const postSelectionToAi = useCallback(
     async (u: number, v: number) => {
       if (!aiBase) throw new Error("AI Server not set.");
-      // recommended endpoint contract
       const data = await aiPost("/api/ai_server/pick_place/select", {
         u,
         v,
@@ -659,90 +686,158 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     [aiBase, aiPost]
   );
 
+  const executePickPlace = useCallback(
+    async (action: "pick" | "place", u: number, v: number, px: number, py: number) => {
+      if (!aiModeActive) throw new Error("AI mode is not running.");
+      if (!aiBase) throw new Error("AI Server not set.");
+      if (!gatewayBase) throw new Error("Gateway not set.");
+      if (!robotConnected) throw new Error("Robot not connected.");
+      if (!enabled) throw new Error("Robot is disabled.");
+
+      // lock everything, stop jog loop immediately
+      endHoldJog();
+      setPhase("busy");
+      setSelecting(true);
+      setAiLoading(true);
+
+      // show marker immediately
+      setSelection({ u, v, px, py });
+
+      try {
+        const sid = await postSelectionToAi(u, v);
+        if (!sid) throw new Error("Selection ID missing from AI response.");
+
+        setSelection((prev) => (prev ? { ...prev, selectionId: sid } : prev));
+
+        await aiPost("/api/ai_server/pick_place/execute", {
+          action,
+          selection_id: sid,
+        });
+
+        // After pick/place => ALWAYS go back to vision pose (requested)
+        try {
+          await apiPost("/api/robot/vision_pose");
+        } catch {
+          // If vision pose fails, still continue workflow, but notify.
+          Alert.alert("Warning", "Pick/Place done, but returning to Vision pose failed.");
+        }
+
+        if (action === "pick") {
+          setHasPicked(true);
+          setSelection(null);
+          setPhase("idle"); // now user should press Place
+        } else {
+          // place completes the cycle
+          setHasPicked(false);
+          setSelection(null);
+          setPhase("idle");
+        }
+      } finally {
+        setSelecting(false);
+        setAiLoading(false);
+      }
+    },
+    [
+      aiBase,
+      aiModeActive,
+      aiPost,
+      apiPost,
+      enabled,
+      endHoldJog,
+      gatewayBase,
+      postSelectionToAi,
+      robotConnected,
+    ]
+  );
+
   const onTapCamera = useCallback(
     async (evt: GestureResponderEvent) => {
       if (!cameraStarted) return;
+
       if (!aiModeActive) {
-        Alert.alert("AI mode is not running", "Start AI (pick_and_place) first, then select an object.");
+        Alert.alert("AI mode is not running", "Start AI (pick_and_place) first.");
         return;
       }
       if (!aiBase) {
         Alert.alert("AI Server missing", "Set AI Server URL in Connection Hub.");
         return;
       }
-      if (selecting) return;
+      if (!gatewayBase) {
+        Alert.alert("Gateway missing", "Set Gateway URL first.");
+        return;
+      }
+      if (!robotConnected) {
+        Alert.alert("Robot not connected", "Connect robot first.");
+        return;
+      }
+      if (!enabled) {
+        Alert.alert("Robot disabled", "Enable robot first.");
+        return;
+      }
+
+      // NEW RULE: camera tap only means something when Pick or Place is armed
+      if (phase !== "pick_armed" && phase !== "place_armed") {
+        // ignore taps silently (prevents the old “must tap to enable buttons” behavior)
+        return;
+      }
+
+      if (selecting || aiLoading) return;
 
       const { locationX, locationY } = evt.nativeEvent;
       const { w, h } = cameraLayout.current;
 
-      // stream is 4:3 in your UI
       const mapped = mapTapToNormalizedContain(locationX, locationY, w, h, 4 / 3);
-      if (!mapped) {
-        // tapped in black bars area
+      if (!mapped) return;
+
+      const action: "pick" | "place" = phase === "pick_armed" ? "pick" : "place";
+
+      // Place is meaningless before pick (requested)
+      if (action === "place" && !hasPicked) {
+        Alert.alert("Place not ready", "Press Pick first and complete a Pick action before placing.");
         return;
       }
 
-      // optimistic UI marker (place marker where tapped)
-      const next: Selection = {
-        u: mapped.u,
-        v: mapped.v,
-        px: locationX,
-        py: locationY,
-      };
-      setSelection(next);
-
-      setSelecting(true);
       try {
-        const sid = await postSelectionToAi(mapped.u, mapped.v);
-        setSelection((prev) => (prev ? { ...prev, selectionId: sid } : prev));
+        await executePickPlace(action, mapped.u, mapped.v, locationX, locationY);
       } catch (e: any) {
-        Alert.alert("Selection failed", e?.message || "Failed to send selection to AI.");
-      } finally {
-        setSelecting(false);
+        Alert.alert(`${action === "pick" ? "Pick" : "Place"} failed`, e?.message || "Execution failed.");
+        // if anything fails, go back to idle armed state so user can try again
+        setPhase(action === "pick" ? "pick_armed" : "place_armed");
       }
     },
-    [aiBase, aiModeActive, cameraStarted, postSelectionToAi, selecting]
+    [aiBase, aiLoading, aiModeActive, cameraStarted, enabled, executePickPlace, gatewayBase, hasPicked, phase, robotConnected, selecting]
   );
 
   const onClearSelection = useCallback(() => {
     setSelection(null);
   }, []);
 
-  const onExecutePick = useCallback(async () => {
-    if (!gatewayBase) return Alert.alert("Gateway missing", "Set Gateway URL first.");
+  // NEW: Buttons now ARM actions (no immediate execute)
+  const onArmPick = useCallback(() => {
+    if (!aiModeActive) return Alert.alert("AI not running", "Start AI first.");
+    if (!cameraStarted) return Alert.alert("Camera off", "Start camera first.");
     if (!robotConnected) return Alert.alert("Robot not connected", "Connect robot first.");
-    if (!aiBase) return;
-    if (!selection?.selectionId) return Alert.alert("No selection", "Tap on the camera to select an object first.");
-    setAiLoading(true);
-    try {
-      await aiPost("/api/ai_server/pick_place/execute", {
-        action: "pick",
-        selection_id: selection.selectionId,
-      });
-    } catch (e: any) {
-      Alert.alert("Pick failed", e?.message || "Pick execution failed.");
-    } finally {
-      setAiLoading(false);
-    }
-  }, [aiBase, aiPost, selection?.selectionId]);
+    if (!enabled) return Alert.alert("Robot disabled", "Enable robot first.");
 
-  const onExecutePlace = useCallback(async () => {
-    if (!gatewayBase) return Alert.alert("Gateway missing", "Set Gateway URL first.");
+    setSelection(null);
+    setPhase("pick_armed");
+  }, [aiModeActive, cameraStarted, enabled, robotConnected]);
+
+  const onArmPlace = useCallback(() => {
+    if (!hasPicked) return Alert.alert("Pick required", "You must complete a Pick before placing.");
+    if (!aiModeActive) return Alert.alert("AI not running", "Start AI first.");
+    if (!cameraStarted) return Alert.alert("Camera off", "Start camera first.");
     if (!robotConnected) return Alert.alert("Robot not connected", "Connect robot first.");
-    if (!aiBase) return;
-    if (!selection?.selectionId) return Alert.alert("No selection", "Tap on the camera to select an object first.");
-    setAiLoading(true);
-    try {
-      await aiPost("/api/ai_server/pick_place/execute", {
-        action: "place",
-        selection_id: selection.selectionId,
-      });
-    } catch (e: any) {
-      Alert.alert("Place failed", e?.message || "Place execution failed.");
-    } finally {
-      setAiLoading(false);
-    }
-  }, [aiBase, aiPost, selection?.selectionId]);
+    if (!enabled) return Alert.alert("Robot disabled", "Enable robot first.");
+
+    setSelection(null);
+    setPhase("place_armed");
+  }, [aiModeActive, cameraStarted, enabled, hasPicked, robotConnected]);
+
+  const onCancelWorkflow = useCallback(() => {
+    setSelection(null);
+    setPhase("idle");
+  }, []);
 
   // Layout
   const leftW = useMemo(() => clamp(Math.round(width * 0.20), 240, 310), [width]);
@@ -757,15 +852,12 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     );
   }
 
-
-
-
   // Telemetry fields
-
   const ai = (live as any)?.ai_server || {};
   const cam = (live as any)?.camera || {};
   const safety = (live as any)?.safety || {};
   const st = (live as any)?.status || {};
+
   const isMovingWs =
     typeof st.is_moving === "boolean"
       ? st.is_moving
@@ -775,15 +867,17 @@ export default function PickPlaceScreen({ navigation, route }: any) {
           ? true
           : false;
 
-  const jogLocked = isMovingWs && !isForceUnlocked();
+  // NEW: lock jog when robot moving OR when pick/place is armed/busy (requested)
+  const workflowLocked = phase !== "idle"; // pick_armed/place_armed/busy => lock jog + gripper
+  const jogLocked = (isMovingWs && !isForceUnlocked()) || workflowLocked || selecting || aiLoading;
 
   const canControl = !!gatewayBase && robotConnected && !jogLocked;
 
   const gripperRightText = gripperLoading ? "Loading…" : !gripperAvailable ? "N/A" : `${gripperPct}/100`;
 
-  const canCameraToggle = !!gatewayBase && !cameraLoading;
-  const canRobotToggle = !!gatewayBase && robotConnected;
-  const canAiToggle = !!aiBase && !!gatewayBase && !aiLoading;
+  const canCameraToggle = !!gatewayBase && !cameraLoading && phase === "idle"; // avoid stop/start while armed/busy
+  const canRobotToggle = !!gatewayBase && robotConnected && phase === "idle"; // avoid enable/disable mid workflow
+  const canAiToggle = !!aiBase && !!gatewayBase && !aiLoading && phase === "idle"; // avoid toggling mid workflow
 
   const aiBtnLabel = aiModeActive ? "AI-Stop" : "AI-Start";
   const aiBtnIcon = aiModeActive ? "stop-circle-outline" : "play-circle-outline";
@@ -801,6 +895,32 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     if (cameraStarted) onCameraStop();
     else onCameraStart();
   };
+
+  // Left-panel instruction text (NEW)
+  const instructionText = useMemo(() => {
+    if (!gatewayBase) return "Gateway is not set. Open Connection Hub.";
+    if (!robotConnected) return "Robot is not connected.";
+    if (!aiModeActive) return "Start AI to use pick&place.";
+    if (!cameraStarted) return "Start camera first.";
+    if (!enabled) return "Enable robot first.";
+
+    if (phase === "pick_armed") return "Pick armed → tap camera to pick.";
+    if (phase === "place_armed") return "Place armed → tap camera to place.";
+    if (phase === "busy") return "Working… Please wait.";
+    if (hasPicked) return "Pick done ✓ Now press Place, then tap camera.";
+    return "Press Pick, then tap camera.";
+  }, [aiModeActive, cameraStarted, enabled, gatewayBase, hasPicked, phase, robotConnected]);
+
+  // Camera hint chip (NEW)
+  const cameraHint = useMemo(() => {
+    if (!cameraStarted) return "";
+    if (!aiModeActive) return "Start AI to use pick&place";
+    if (phase === "pick_armed") return "Tap to PICK";
+    if (phase === "place_armed") return "Tap to PLACE";
+    if (phase === "busy") return "Working…";
+    if (hasPicked) return "Press Place to continue";
+    return "Press Pick to start";
+  }, [aiModeActive, cameraStarted, hasPicked, phase]);
 
   return (
     <ImageBackground source={require("../../assets/splash.jpg")} style={styles.bg} resizeMode="cover">
@@ -878,8 +998,8 @@ export default function PickPlaceScreen({ navigation, route }: any) {
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 14 }}>
               <BarCard title="Speed" rightText={`${speedPct}%`} valuePct={speedPct} />
               <View style={styles.speedBtnsRow}>
-                <IconBtn icon="minus" label="Speed" onPress={() => pushSpeed(speedPct - 5)} disabled={!gatewayBase} />
-                <IconBtn icon="plus" label="Speed" onPress={() => pushSpeed(speedPct + 5)} disabled={!gatewayBase} />
+                <IconBtn icon="minus" label="Speed" onPress={() => pushSpeed(speedPct - 5)} disabled={!gatewayBase || workflowLocked} />
+                <IconBtn icon="plus" label="Speed" onPress={() => pushSpeed(speedPct + 5)} disabled={!gatewayBase || workflowLocked} />
               </View>
 
               <View style={{ marginTop: 12 }}>
@@ -888,21 +1008,14 @@ export default function PickPlaceScreen({ navigation, route }: any) {
                 </Pressable>
               </View>
 
-              {!gatewayBase ? (
-                <Text style={styles.note}>Gateway is not set. Open Connection Hub.</Text>
-              ) : !robotConnected ? (
-                <Text style={styles.note}>Robot is not connected.</Text>
-              ) : !aiModeActive ? (
-                <Text style={styles.note}>Start AI to select an object on the camera.</Text>
-              ) : selection ? (
+              <Text style={styles.note}>{instructionText}</Text>
+
+              {selection ? (
                 <Text style={styles.note}>
-                  Selected: u={selection.u.toFixed(3)}, v={selection.v.toFixed(3)} {selection.selectionId ? "✓" : selecting ? "(sending…)" : ""}
+                  Selected: u={selection.u.toFixed(3)}, v={selection.v.toFixed(3)}{" "}
+                  {selection.selectionId ? "✓" : selecting ? "(sending…)" : ""}
                 </Text>
-              ) : (
-                <Text style={styles.note}>Tap on camera to select an object.</Text>
-              )}
-
-
+              ) : null}
             </ScrollView>
           </View>
 
@@ -953,30 +1066,18 @@ export default function PickPlaceScreen({ navigation, route }: any) {
                       style={styles.web}
                     />
 
-                    {/* TAP overlay (keeps visual, enables object selection) */}
-                    <Pressable
-                      style={styles.tapOverlay}
-                      onPress={onTapCamera}
-                      disabled={!cameraStarted}
-                    >
+                    {/* TAP overlay */}
+                    <Pressable style={styles.tapOverlay} onPress={onTapCamera} disabled={!cameraStarted || phase === "busy"}>
                       {/* Marker */}
                       {selection && (
-                        <View
-                          pointerEvents="none"
-                          style={[
-                            styles.marker,
-                            { left: selection.px - 10, top: selection.py - 10 },
-                          ]}
-                        />
+                        <View pointerEvents="none" style={[styles.marker, { left: selection.px - 10, top: selection.py - 10 }]} />
                       )}
                     </Pressable>
 
-                    {/* Small hint chip */}
+                    {/* Hint chip */}
                     {cameraStarted && (
                       <View pointerEvents="none" style={styles.cameraHintChip}>
-                        <Text style={styles.cameraHintText}>
-                          {aiModeActive ? "Tap to select" : "Start AI to select"}
-                        </Text>
+                        <Text style={styles.cameraHintText}>{cameraHint}</Text>
                       </View>
                     )}
                   </View>
@@ -988,63 +1089,66 @@ export default function PickPlaceScreen({ navigation, route }: any) {
           {/* RIGHT */}
           <View style={[styles.panel, { width: rightW }]}>
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 14 }}>
-
               {jogLocked && (
                 <Text style={styles.note}>
-                  Robot is moving → Jog controls locked for safety. Press STOP to regain control.
+                  {phase !== "idle"
+                    ? "Pick/Place active → Jog controls locked."
+                    : "Robot is moving → Jog controls locked for safety. Press STOP to regain control."}
                 </Text>
               )}
 
               {/* XY */}
               <View style={styles.jogTopRow}>
                 <HoldBtn label="Z+" disabled={!canControl} onHoldStart={() => startHoldJog("z", +1)} onHoldEnd={endHoldJog} />
-
                 <HoldBtn label="X+" disabled={!canControl} onHoldStart={() => startHoldJog("x", +1)} onHoldEnd={endHoldJog} />
                 <HoldBtn label="Z-" disabled={!canControl} onHoldStart={() => startHoldJog("z", -1)} onHoldEnd={endHoldJog} />
-
               </View>
 
               <View style={styles.jogMidRow}>
                 <HoldBtn label="Y+" disabled={!canControl} onHoldStart={() => startHoldJog("y", +1)} onHoldEnd={endHoldJog} />
                 <View style={styles.jogCenter}>
-                  <IconBtn icon="home" label="" onPress={onRobotHome} disabled={!gatewayBase || !robotConnected} />
+                  <IconBtn icon="eye-outline" label="" onPress={onVisionPose} disabled={!canRobotToggle} size="sm" />
                 </View>
                 <HoldBtn label="Y-" disabled={!canControl} onHoldStart={() => startHoldJog("y", -1)} onHoldEnd={endHoldJog} />
               </View>
 
               <View style={styles.jogBottomRow}>
                 <HoldBtn label="Grip-" disabled={!canControl || !gripperAvailable} onPress={() => sendGripper("close")} />
-
                 <HoldBtn label="X-" disabled={!canControl} onHoldStart={() => startHoldJog("x", -1)} onHoldEnd={endHoldJog} />
                 <HoldBtn label="Grip+" disabled={!canControl || !gripperAvailable} onPress={() => sendGripper("open")} />
-
               </View>
 
-              {/* Pick/Place actions (selection required) */}
+              {/* Pick/Place actions: NEW workflow */}
               <View style={{ marginTop: 14, gap: 10 }}>
-                <IconBtn
-                  icon="crosshairs-gps"
-                  label="Clear Sel"
-                  onPress={onClearSelection}
-                  disabled={!selection}
-                  size="sm"
-                />
-                <IconBtn
-                  icon="cube-scan"
-                  label={aiLoading ? "Pick..." : "Pick"}
-                  onPress={onExecutePick}
-                  disabled={!aiModeActive || !selection?.selectionId || aiLoading}
-                  tone="primary"
-                  size="sm"
-                />
-                <IconBtn
-                  icon="cube-send"
-                  label={aiLoading ? "Place..." : "Place"}
-                  onPress={onExecutePlace}
-                  disabled={!aiModeActive || !selection?.selectionId || aiLoading}
-                  tone="success"
-                  size="sm"
-                />
+                <View style={{ flexDirection: "row", justifyContent: "space-evenly", marginTop: 14 }}>
+                  <IconBtn
+                    icon="cube-scan"
+                    label={phase === "pick_armed" ? "Pick ✓" : "Pick"}
+                    onPress={onArmPick}
+                    disabled={!aiModeActive || !cameraStarted || !robotConnected || !enabled || aiLoading || selecting || phase === "busy"}
+                    tone={phase === "pick_armed" ? "success" : "primary"}
+                    size="md"
+                  />
+                  <IconBtn
+                    icon="cube-send"
+                    label={phase === "place_armed" ? "Place ✓" : "Place"}
+                    onPress={onArmPlace}
+                    disabled={
+                      !hasPicked || !aiModeActive || !cameraStarted || !robotConnected || !enabled || aiLoading || selecting || phase === "busy"
+                    }
+                    tone={phase === "place_armed" ? "success" : "ghost"}
+                    size="md"
+                  />
+                </View>
+
+                <View style={{ flexDirection: "row", justifyContent: "space-evenly" }}>
+                  <IconBtn icon="crosshairs-gps" label="Clear Sel" onPress={onClearSelection} disabled={!selection || phase === "busy"} size="md" tone="danger" />
+                  <IconBtn icon="close-circle-outline" label="Cancel" onPress={onCancelWorkflow} disabled={phase === "idle" || phase === "busy"} size="md" tone="ghost" />
+                </View>
+
+                {hasPicked && phase === "idle" && (
+                  <Text style={styles.note}>Pick completed. Press Place, then tap camera.</Text>
+                )}
               </View>
             </ScrollView>
           </View>
@@ -1155,7 +1259,11 @@ export default function PickPlaceScreen({ navigation, route }: any) {
                     <TelemetryRow k="AI latency" v={typeof ai.latency_ms === "number" ? `${ai.latency_ms} ms` : "-"} />
                     <TelemetryRow k="Camera started" v={cameraStarted ? "Yes" : "No"} />
                     <TelemetryRow k="Safety" v={safetyLimit ? "Limit hit" : safety?.message ? "Warning" : "OK"} />
-                    <TelemetryRow k="Selection" v={selection ? `u=${selection.u.toFixed(2)} v=${selection.v.toFixed(2)}` : "-"} />
+                    <TelemetryRow k="Workflow" v={`${phase}${hasPicked ? " (picked)" : ""}`} />
+                    <TelemetryRow
+                      k="Selection"
+                      v={selection ? `u=${selection.u.toFixed(2)} v=${selection.v.toFixed(2)}` : "-"}
+                    />
                   </View>
 
                   {!!safety?.message && <Text style={styles.drawerHint}>Safety message: {String(safety.message)}</Text>}
@@ -1184,12 +1292,11 @@ export default function PickPlaceScreen({ navigation, route }: any) {
                       label={enabled ? "Disable" : "Enable"}
                       tone={enabled ? "ghost" : "primary"}
                       onPress={onEnableDisable}
-                      disabled={!gatewayBase || !robotConnected}
+                      disabled={!gatewayBase || !robotConnected || phase !== "idle"}
                     />
-                    <IconBtn icon="shield-alert-outline" label="Clear Safety" onPress={onClearSafety} disabled={!gatewayBase} />
-                    <IconBtn icon="home" label="Home" onPress={onRobotHome} disabled={!gatewayBase || !robotConnected} />
+                    <IconBtn icon="shield-alert-outline" label="Clear Safety" onPress={onClearSafety} disabled={!gatewayBase || phase !== "idle"} />
+                    <IconBtn icon="home" label="Home" onPress={onRobotHome} disabled={!gatewayBase || !robotConnected || phase !== "idle"} />
                     <IconBtn icon="eye-outline" label="Vision" onPress={onVisionPose} disabled={!canRobotToggle} />
-
                   </View>
 
                   {(safetyLimit || safetyMsg) && (
@@ -1208,8 +1315,8 @@ export default function PickPlaceScreen({ navigation, route }: any) {
                   </Text>
 
                   <View style={styles.drawerBtnRow}>
-                    <IconBtn icon="play" label="Start" tone="primary" onPress={onCameraStart} disabled={!gatewayBase || cameraLoading} />
-                    <IconBtn icon="stop" label="Stop" tone="danger" onPress={onCameraStop} disabled={!gatewayBase || cameraLoading} />
+                    <IconBtn icon="play" label="Start" tone="primary" onPress={onCameraStart} disabled={!gatewayBase || cameraLoading || phase !== "idle"} />
+                    <IconBtn icon="stop" label="Stop" tone="danger" onPress={onCameraStop} disabled={!gatewayBase || cameraLoading || phase !== "idle"} />
                     <IconBtn icon="refresh" label="Status" onPress={refreshCameraStatus} disabled={!gatewayBase || cameraLoading} />
                   </View>
                 </View>
@@ -1362,7 +1469,6 @@ const styles = StyleSheet.create({
   webLoading: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10 },
   webLoadingText: { color: "rgba(255,255,255,0.55)", fontWeight: "800", fontSize: 12 },
 
-  // tap overlay + marker
   tapOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "transparent",
