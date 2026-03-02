@@ -1,14 +1,15 @@
 # ai_server/main.py
 from __future__ import annotations
 
+import atexit
 import os
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import asdict
 from typing import Any, Dict, Optional
 
+import httpx
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -16,8 +17,18 @@ from pydantic import BaseModel, Field
 
 from config import CONFIG
 
-
 app = FastAPI(title="AI Server", version="1.0.0")
+
+
+# -------------------------
+# Pick&Place worker config
+# -------------------------
+PICKPLACE_HOST = "127.0.0.1"
+PICKPLACE_PORT = int(os.environ.get("PICKPLACE_API_PORT", "9011"))
+
+
+def _pickplace_url(path: str) -> str:
+    return f"http://{PICKPLACE_HOST}:{PICKPLACE_PORT}{path}"
 
 
 # -------------------------
@@ -74,7 +85,6 @@ def _stop_active() -> None:
     p = _active.popen
     try:
         if p.poll() is None:
-            # graceful
             if os.name == "nt":
                 p.terminate()
             else:
@@ -85,6 +95,10 @@ def _stop_active() -> None:
                 p.kill()
     finally:
         _active = None
+
+
+# Ensure cleanup on exit
+atexit.register(_stop_active)
 
 
 def _start_mode(mode: str, gateway_url: str) -> Dict[str, Any]:
@@ -105,19 +119,30 @@ def _start_mode(mode: str, gateway_url: str) -> Dict[str, Any]:
     if CONFIG.single_active_mode:
         _stop_active()
     else:
-        # if multi mode allowed, you'd manage a dict; for now keep simple
         if _active is not None and _active.is_running():
             return {"ok": False, "message": "another mode already running"}
 
     env = os.environ.copy()
     env["GATEWAY_URL"] = gw
 
-    # run: python -u pick_and_place.py
+    # IMPORTANT: give worker a fixed host/port so manager can proxy reliably
+    env["PICKPLACE_API_HOST"] = PICKPLACE_HOST
+    env["PICKPLACE_API_PORT"] = str(PICKPLACE_PORT)
+
     cmd = [sys.executable, "-u", entry]
     p = subprocess.Popen(cmd, env=env)
 
     _active = ModeProc(mode=mode, popen=p, gateway_url=gw, started_at=time.time())
     return {"ok": True, "message": "mode started", "status": _mode_status()}
+
+
+def _ensure_pickplace_running() -> Optional[str]:
+    st = _mode_status()
+    if not st.get("active"):
+        return "no active mode"
+    if st.get("mode") != "pick_and_place":
+        return "pick_and_place mode is not running"
+    return None
 
 
 # -------------------------
@@ -132,18 +157,24 @@ class ModeStopBody(BaseModel):
     mode: Optional[str] = Field(None, description="optional; if given must match active mode")
 
 
+class PickSelectBody(BaseModel):
+    u: float = Field(..., ge=0.0, le=1.0)
+    v: float = Field(..., ge=0.0, le=1.0)
+    source: str = Field("realsense_mjpeg")
+    ts: Optional[int] = None
+
+
+class PickExecuteBody(BaseModel):
+    action: str = Field(..., description="pick|place")
+    selection_id: str
+
+
 # -------------------------
 # Routes
 # -------------------------
 @app.get("/health")
 def health():
-    return JSONResponse(
-        {
-            "ok": True,
-            "service": "ai_server",
-            "message": CONFIG.health_ok_message,
-        }
-    )
+    return JSONResponse({"ok": True, "service": "ai_server", "message": CONFIG.health_ok_message})
 
 
 @app.get("/api/ai_server/modes/status")
@@ -155,6 +186,7 @@ def modes_status():
             "single_active_mode": CONFIG.single_active_mode,
             "available_modes": sorted(list((CONFIG.mode_entrypoints or {}).keys())),
             "active_mode": _mode_status(),
+            "pickplace_worker": {"host": PICKPLACE_HOST, "port": PICKPLACE_PORT},
         }
     )
 
@@ -168,7 +200,6 @@ def modes_start(body: ModeStartBody):
 
 @app.post("/api/ai_server/modes/stop")
 def modes_stop(body: ModeStopBody):
-    global _active
     st = _mode_status()
     if not st.get("active"):
         return JSONResponse({"ok": True, "message": "no active mode"})
@@ -178,6 +209,41 @@ def modes_stop(body: ModeStopBody):
 
     _stop_active()
     return JSONResponse({"ok": True, "message": "stopped"})
+
+
+# -------------------------
+# Pick&Place proxy endpoints (mobile expects these)
+# -------------------------
+@app.post("/api/ai_server/pick_place/select")
+def pick_place_select(body: PickSelectBody):
+    err = _ensure_pickplace_running()
+    if err:
+        return JSONResponse(status_code=400, content={"ok": False, "message": err})
+
+    try:
+        with httpx.Client(timeout=3.0) as c:
+            r = c.post(_pickplace_url("/select"), json=body.model_dump())
+            return JSONResponse(status_code=r.status_code, content=r.json())
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"pick_place worker unavailable: {e}"})
+
+
+@app.post("/api/ai_server/pick_place/execute")
+def pick_place_execute(body: PickExecuteBody):
+    err = _ensure_pickplace_running()
+    if err:
+        return JSONResponse(status_code=400, content={"ok": False, "message": err})
+
+    act = (body.action or "").strip().lower()
+    if act not in ("pick", "place"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "action must be pick|place"})
+
+    try:
+        with httpx.Client(timeout=5.0) as c:
+            r = c.post(_pickplace_url("/execute"), json={"action": act, "selection_id": body.selection_id})
+            return JSONResponse(status_code=r.status_code, content=r.json())
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"pick_place worker unavailable: {e}"})
 
 
 if __name__ == "__main__":

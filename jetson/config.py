@@ -1,8 +1,35 @@
 # jetson/config.py
-from dataclasses import dataclass
-from typing import Optional
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Dict, Any
 
 
+# ----------------
+# Nested configs
+# ----------------
+@dataclass(frozen=True)
+class VisionPose:
+    # Units: mm + degrees
+    x: float = 250.0
+    y: float = 0.0
+    z: float = 350.0
+    roll: float = 180.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+    speed: int = 120
+    wait: bool = True
+
+
+@dataclass(frozen=True)
+class RobotConfig:
+    # The reference pose used by vision/pick-place pipelines
+    vision_pose: VisionPose = field(default_factory=VisionPose)
+
+
+# ----------------
+# App config
+# ----------------
 @dataclass(frozen=True)
 class AppConfig:
     host: str = "0.0.0.0"
@@ -10,7 +37,7 @@ class AppConfig:
     debug: bool = True
 
     # ----------------
-    # Robot
+    # Robot (flat fields kept for backward compatibility)
     # ----------------
     default_speed_pct: int = 50
     gripper_min: int = 0
@@ -19,6 +46,13 @@ class AppConfig:
 
     # If True: after connect(), gateway will auto-enable robot (motion_enable)
     robot_autostart_enable: bool = True
+
+    # NEW: nested robot config (CONFIG.robot.vision_pose)
+    robot: RobotConfig = field(default_factory=RobotConfig)
+
+    # Optional: if later you confirm xArm state codes that mean "moving",
+    # you can fill these values. Leave empty for now.
+    robot_state_moving_values: Tuple[int, ...] = ()
 
     # ----------------
     # SAFETY LIMITS (None => no limit)
@@ -53,6 +87,21 @@ class AppConfig:
 
     # If True: streamer opens automatically on init
     camera_autostart: bool = True
+
+
+    @property
+    def robot_vision_pose(self) -> Dict[str, Any]:
+        vp = self.robot.vision_pose
+        return {
+            "x": vp.x,
+            "y": vp.y,
+            "z": vp.z,
+            "roll": vp.roll,
+            "pitch": vp.pitch,
+            "yaw": vp.yaw,
+            "speed": vp.speed,
+            "wait": vp.wait,
+        }
 
 
 CONFIG = AppConfig()

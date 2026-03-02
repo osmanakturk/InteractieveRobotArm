@@ -19,6 +19,8 @@ class RobotStatus:
     connected: bool
     ip: str = ""
     is_enabled: bool = False
+    is_moving: bool = False
+
     state: Optional[int] = None
     mode: Optional[int] = None
     error_code: Optional[int] = None
@@ -53,6 +55,10 @@ class RobotController:
         self._last_jog_ts: float = 0.0
         self._enabled_flag: bool = False
 
+        # moving detection (server-side)
+        self._moving_flag: bool = False
+        self._moving_until_ts: float = 0.0  # monotonic seconds
+
     # -------------------------
     # Low-level hardware snapshot
     # -------------------------
@@ -68,6 +74,34 @@ class RobotController:
             }
         except Exception:
             return {"state": None, "mode": None, "error_code": None, "warn_code": None}
+
+    # -------------------------
+    # Moving helpers
+    # -------------------------
+    def _set_moving(self, v: bool, ttl_s: float = 0.0) -> None:
+        self._moving_flag = bool(v)
+        if ttl_s > 0:
+            self._moving_until_ts = max(self._moving_until_ts, time.monotonic() + float(ttl_s))
+        else:
+            if not v:
+                self._moving_until_ts = 0.0
+
+    def _is_moving_now(self, hw_state: Optional[int]) -> bool:
+        # Primary truth: our own tracking + TTL
+        now = time.monotonic()
+        if self._moving_flag or (self._moving_until_ts and now < self._moving_until_ts):
+            return True
+
+        # Optional: if you later learn the exact xArm moving states, enable via config tuple
+        moving_states = getattr(CONFIG, "robot_state_moving_values", None)
+        if moving_states and hw_state is not None:
+            try:
+                if int(hw_state) in set(int(x) for x in moving_states):
+                    return True
+            except Exception:
+                pass
+
+        return False
 
     # -------------------------
     # Safety helpers
@@ -147,6 +181,7 @@ class RobotController:
             pass
 
         self._enabled_flag = False
+        self._set_moving(False)
         self._set_safety_hit(reason + " Robot was disabled for safety. Press Enable again to continue.")
 
     # -------------------------
@@ -176,6 +211,9 @@ class RobotController:
         with self._lock:
             if XArmAPI is None:
                 return False, "xArm SDK not installed (pip install xarm-python-sdk)."
+
+            # reset moving state on connect attempt
+            self._set_moving(False)
 
             if self._arm is not None:
                 try:
@@ -228,10 +266,12 @@ class RobotController:
             except Exception as e:
                 self._arm = None
                 self._enabled_flag = False
+                self._set_moving(False)
                 return False, f"Connect failed: {e}"
 
     def disconnect(self) -> Tuple[bool, str]:
         with self._lock:
+            self._set_moving(False)
             if self._arm is None:
                 self._ip = ""
                 self._enabled_flag = False
@@ -294,8 +334,10 @@ class RobotController:
                 except Exception:
                     pass
                 self._enabled_flag = False
+                self._set_moving(False)
                 return True, "Disabled/Stopped."
             except Exception as e:
+                self._set_moving(False)
                 return False, f"Disable failed: {e}"
 
     def stop(self) -> Tuple[bool, str]:
@@ -308,8 +350,10 @@ class RobotController:
                 except Exception:
                     pass
                 self._enabled_flag = False
+                self._set_moving(False)
                 return True, "Stopped."
             except Exception as e:
+                self._set_moving(False)
                 return False, f"Stop failed: {e}"
 
     def go_home(self) -> Tuple[bool, str]:
@@ -321,14 +365,17 @@ class RobotController:
                 if hasattr(self._arm, "move_gohome"):
                     code = self._arm.move_gohome(wait=False)
                     if isinstance(code, int) and code != 0:
+                        self._set_moving(False)
                         return False, f"move_gohome failed code={code}"
+                    self._set_moving(True, ttl_s=0.50)
                     return True, "Going home."
                 return False, "Home not supported."
             except Exception as e:
+                self._set_moving(False)
                 return False, f"Home failed: {e}"
 
     # -------------------------
-    # NEW: Absolute pose move for pick&place
+    # Absolute pose move for pick&place
     # -------------------------
     def move_pose(
         self,
@@ -352,19 +399,31 @@ class RobotController:
                 self._force_disable_for_safety(reason)
                 return False, self._safety_message
 
-            # speed/mvacc: keep consistent scaling style
             spd = int(max(1, speed))
             mvacc = max(1, int(2000 * (self._speed_pct / 100.0)))
 
             kwargs = dict(
-                x=float(x), y=float(y), z=float(z),
-                roll=float(roll), pitch=float(pitch), yaw=float(yaw),
-                relative=False, wait=bool(wait),
-                speed=spd, mvacc=mvacc, is_radian=False,
+                x=float(x),
+                y=float(y),
+                z=float(z),
+                roll=float(roll),
+                pitch=float(pitch),
+                yaw=float(yaw),
+                relative=False,
+                wait=bool(wait),
+                speed=spd,
+                mvacc=mvacc,
+                is_radian=False,
             )
             kwargs["coordinate_mode"] = 1 if self._frame == "tool" else 0
 
             try:
+                # moving flags
+                if wait:
+                    self._set_moving(True)
+                else:
+                    self._set_moving(True, ttl_s=0.25)
+
                 try:
                     code = self._arm.set_position(**kwargs)  # type: ignore[union-attr]
                 except TypeError:
@@ -372,9 +431,14 @@ class RobotController:
                     code = self._arm.set_position(**kwargs)  # type: ignore[union-attr]
 
                 if isinstance(code, int) and code != 0:
+                    self._set_moving(False)
                     return False, f"set_position failed code={code}"
+
+                if wait:
+                    self._set_moving(False)
                 return True, "OK"
             except Exception as e:
+                self._set_moving(False)
                 return False, f"move_pose failed: {e}"
 
     # -------------------------
@@ -449,13 +513,24 @@ class RobotController:
             mvacc = max(1, int(2000 * (self._speed_pct / 100.0)))
 
             kwargs = dict(
-                x=float(dx), y=float(dy), z=float(dz),
-                roll=float(droll), pitch=float(dpitch), yaw=float(dyaw),
-                relative=True, wait=False, speed=speed, mvacc=mvacc, is_radian=False,
+                x=float(dx),
+                y=float(dy),
+                z=float(dz),
+                roll=float(droll),
+                pitch=float(dpitch),
+                yaw=float(dyaw),
+                relative=True,
+                wait=False,
+                speed=speed,
+                mvacc=mvacc,
+                is_radian=False,
             )
             kwargs["coordinate_mode"] = 1 if self._frame == "tool" else 0
 
             try:
+                # jog is non-blocking -> TTL
+                self._set_moving(True, ttl_s=0.20)
+
                 try:
                     code = self._arm.set_position(**kwargs)  # type: ignore[union-attr]
                 except TypeError:
@@ -463,9 +538,12 @@ class RobotController:
                     code = self._arm.set_position(**kwargs)  # type: ignore[union-attr]
 
                 if isinstance(code, int) and code != 0:
+                    self._set_moving(False)
                     return False, f"set_position failed code={code}", False
+
                 return True, "OK", False
             except Exception as e:
+                self._set_moving(False)
                 return False, f"Jog failed: {e}", False
 
     # -------------------------
@@ -551,6 +629,7 @@ class RobotController:
                     safety_limit_hit=self._safety_limit_hit,
                     safety_message=self._safety_message,
                     is_enabled=False,
+                    is_moving=False,
                 )
                 return asdict(st)
 
@@ -568,6 +647,7 @@ class RobotController:
             )
 
             st.is_enabled = bool(self._enabled_flag) and (st.error_code in (0, None)) and (not self._safety_limit_hit)
+            st.is_moving = self._is_moving_now(st.state)
 
             gs = self.gripper_status()
             st.gripper_available = bool(gs["available"])

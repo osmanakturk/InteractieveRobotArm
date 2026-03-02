@@ -86,7 +86,6 @@ class AiMonitor:
 
             if r.status_code == 200 and bool(data.get("ok")):
                 modes = None
-                # optional: modes status
                 try:
                     mr = await client.get(url.rstrip("/") + "/api/ai_server/modes/status")
                     if mr.status_code == 200:
@@ -135,25 +134,36 @@ class AiMonitor:
             }
 
     async def log_on_change(self) -> None:
-        st = await self.status()
-        connected = bool(st.get("connected"))
-        configured = bool(st.get("configured"))
-        if not configured:
-            self._last_logged_connected = None
-            return
-        if self._last_logged_connected is None or self._last_logged_connected != connected:
-            self._last_logged_connected = connected
-            if connected:
-                print(f"[AI] health OK ({st.get('latency_ms')}ms) -> {st.get('url')}")
-            else:
-                print(f"[AI] health FAIL -> {st.get('error')}")
+        async with self._lock:
+            configured = bool(self._configured_url)
+            connected = bool(self._connected)
+            last_logged = self._last_logged_connected
+            st = {
+                "url": self._configured_url,
+                "latency_ms": self._last_latency_ms,
+                "error": self._last_error,
+            }
+
+            if not configured:
+                self._last_logged_connected = None
+                return
+
+            if last_logged is None or last_logged != connected:
+                self._last_logged_connected = connected
+                if connected:
+                    print(f"[AI] health OK ({st.get('latency_ms')}ms) -> {st.get('url')}")
+                else:
+                    print(f"[AI] health FAIL -> {st.get('error')}")
+
+    async def _should_check(self) -> bool:
+        async with self._lock:
+            return bool(self._configured_url)
 
 
 async def ai_watchdog_loop(ai: AiMonitor, interval_s: float = 1.0) -> None:
     while True:
         try:
-            st = await ai.status()
-            if st.get("configured"):
+            if await ai._should_check():
                 await ai.check_once()
                 await ai.log_on_change()
             await asyncio.sleep(interval_s)

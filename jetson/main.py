@@ -27,14 +27,14 @@ if platform.system().lower().startswith("win"):
 
 
 def ok(data: Optional[Dict[str, Any]] = None):
-    payload = {"ok": True}
+    payload: Dict[str, Any] = {"ok": True}
     if data:
         payload.update(data)
     return JSONResponse(payload)
 
 
 def fail(message: str, status: int = 400, data: Optional[Dict[str, Any]] = None):
-    payload = {"ok": False, "message": message}
+    payload: Dict[str, Any] = {"ok": False, "message": message}
     if data:
         payload.update(data)
     return JSONResponse(payload, status_code=status)
@@ -83,7 +83,7 @@ class AiServerBody(BaseModel):
 class GraspPackBody(BaseModel):
     x: int = Field(..., description="pixel x in color image")
     y: int = Field(..., description="pixel y in color image")
-    crop_size: int = Field(300, description="square crop size")
+    crop_size: int = Field(300, ge=50, le=1000, description="square crop size")
 
 
 robot = RobotController()
@@ -102,6 +102,13 @@ async def lifespan(app: FastAPI):
     await ai.set_client(_http_client)
 
     _ai_task = asyncio.create_task(ai_watchdog_loop(ai, interval_s=1.0))
+
+    # optional camera autostart
+    try:
+        if bool(getattr(CONFIG, "camera_autostart", False)):
+            camera.start()
+    except Exception:
+        pass
 
     try:
         yield
@@ -267,17 +274,21 @@ def api_robot_jog(body: JogBody):
     return ok({"message": msg})
 
 
-# NEW: absolute pose move (required by pick_and_place)
 @app.post("/api/robot/move_pose")
 def api_robot_move_pose(body: RobotMovePoseBody):
     success, msg = robot.move_pose(
-        x=body.x, y=body.y, z=body.z,
-        roll=body.roll, pitch=body.pitch, yaw=body.yaw,
-        speed=body.speed, wait=body.wait,
+        x=body.x,
+        y=body.y,
+        z=body.z,
+        roll=body.roll,
+        pitch=body.pitch,
+        yaw=body.yaw,
+        speed=body.speed,
+        wait=body.wait,
     )
     if not success:
         return fail(msg)
-    return ok({"message": msg})
+    return ok({"message": msg, "robot": robot.status()})
 
 
 @app.get("/api/robot/gripper/status")
@@ -298,6 +309,25 @@ def api_robot_gripper(body: GripperBody):
 def api_robot_safety_clear():
     robot.clear_safety()
     return ok({"message": "Safety status cleared.", "safety": robot.safety_status()})
+
+
+@app.post("/api/robot/vision_pose")
+def api_robot_vision_pose():
+    # FIX: CONFIG.robot.vision_pose (dataclass)
+    vp = CONFIG.robot.vision_pose
+    success, msg = robot.move_pose(
+        x=vp.x,
+        y=vp.y,
+        z=vp.z,
+        roll=vp.roll,
+        pitch=vp.pitch,
+        yaw=vp.yaw,
+        speed=int(vp.speed),
+        wait=bool(vp.wait),
+    )
+    if not success:
+        return fail(msg)
+    return ok({"message": "Vision pose reached.", "robot": robot.status()})
 
 
 # -------------------------
@@ -352,7 +382,6 @@ def api_camera_realsense_stream_mjpeg():
     return StreamingResponse(camera.frames(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-# GGCNN grasp pack
 @app.post("/api/cameras/realsense/get_grasp_pack")
 def api_pick_place_get_grasp_pack(body: GraspPackBody):
     pack = camera.get_grasp_pack(body.x, body.y, body.crop_size, auto_start=True)
