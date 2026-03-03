@@ -39,6 +39,20 @@ class RobotStatus:
 
 
 class RobotController:
+    """
+    Notes (important for your use-case):
+    - We DO NOT remove any existing functionality/endpoints.
+      Your FastAPI endpoints call these methods:
+        - gripper_status()  -> GET /api/robot/gripper/status
+        - gripper_jog()     -> POST /api/robot/gripper   {"action": "open|close"}
+      So manual gripper control continues to work.
+
+    - The main fixes:
+      1) Gripper availability is now validated via return codes (not only exceptions).
+      2) Gripper calls will mark unavailable on failure, so UI/worker won't assume success.
+      3) Best-effort gripper enable is done before commands (common xArm requirement).
+    """
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._arm: Optional["XArmAPI"] = None
@@ -205,6 +219,46 @@ class RobotController:
         return True, "OK"
 
     # -------------------------
+    # Gripper helpers
+    # -------------------------
+    def _mark_gripper_unavailable(self, reason: str = "") -> None:
+        self._gripper_available = False
+        self._gripper_pos = None
+        if reason:
+            # keep last reason in safety_message only if not already a safety lock;
+            # gripper failure is not a safety boundary issue, so we don't touch safety flags here.
+            pass
+
+    def _ensure_gripper_enabled(self) -> Tuple[bool, str]:
+        """
+        Best-effort enable. Many xArm setups need enable before gripper movement commands.
+        We treat non-zero return codes as failures and mark unavailable.
+        """
+        if self._arm is None:
+            self._mark_gripper_unavailable()
+            return False, "Not connected."
+
+        # If SDK lacks gripper methods, it's unavailable.
+        if not hasattr(self._arm, "set_gripper_enable") and not hasattr(self._arm, "set_gripper_position"):
+            self._mark_gripper_unavailable()
+            return False, "Gripper not supported by SDK."
+
+        # Try enable if possible
+        if hasattr(self._arm, "set_gripper_enable"):
+            try:
+                code = self._arm.set_gripper_enable(True)
+                if isinstance(code, int) and code != 0:
+                    self._mark_gripper_unavailable()
+                    return False, f"set_gripper_enable failed code={code}"
+            except Exception as e:
+                self._mark_gripper_unavailable()
+                return False, f"set_gripper_enable error: {e}"
+
+        # Consider it available for now; later actions may still mark it unavailable on error codes.
+        self._gripper_available = True
+        return True, "OK"
+
+    # -------------------------
     # Connection
     # -------------------------
     def connect(self, ip: str) -> Tuple[bool, str]:
@@ -242,17 +296,17 @@ class RobotController:
                 except Exception:
                     pass
 
-                # gripper enable attempt
-                self._gripper_available = True
-                try:
-                    if hasattr(self._arm, "set_gripper_enable"):
-                        self._arm.set_gripper_enable(True)
-                except Exception:
-                    self._gripper_available = False
+                # ---- Gripper init (validated, not just exception-based) ----
+                ok_g, _ = self._ensure_gripper_enabled()
+                if ok_g:
+                    # Try read position; if read fails it's still possibly usable,
+                    # but it helps the UI and later logic.
+                    self._refresh_gripper_cache()
+                else:
+                    # gripper unavailable: keep it false
+                    self._refresh_gripper_cache()
 
-                self._refresh_gripper_cache()
                 self.clear_safety()
-
                 self._enabled_flag = False
 
                 # optional auto-enable
@@ -267,6 +321,7 @@ class RobotController:
                 self._arm = None
                 self._enabled_flag = False
                 self._set_moving(False)
+                self._mark_gripper_unavailable()
                 return False, f"Connect failed: {e}"
 
     def disconnect(self) -> Tuple[bool, str]:
@@ -275,6 +330,7 @@ class RobotController:
             if self._arm is None:
                 self._ip = ""
                 self._enabled_flag = False
+                self._mark_gripper_unavailable()
                 return True, "Already disconnected."
             try:
                 self._arm.disconnect()
@@ -282,8 +338,7 @@ class RobotController:
                 pass
             self._arm = None
             self._ip = ""
-            self._gripper_available = False
-            self._gripper_pos = None
+            self._mark_gripper_unavailable()
             self.clear_safety()
             self._enabled_flag = False
             return True, "Disconnected."
@@ -314,6 +369,11 @@ class RobotController:
 
                 self.clear_safety()
                 self._enabled_flag = True
+
+                # best-effort re-enable gripper after enable (some setups need it)
+                self._ensure_gripper_enabled()
+                self._refresh_gripper_cache()
+
                 return True, "Enabled."
             except Exception as e:
                 self._enabled_flag = False
@@ -550,6 +610,10 @@ class RobotController:
     # Gripper
     # -------------------------
     def _refresh_gripper_cache(self) -> None:
+        """
+        Read gripper position if available. If read fails, do not automatically mark unavailable;
+        read may fail transiently, but move may still work. Availability is decided by enable/move.
+        """
         if self._arm is None or not self._gripper_available:
             self._gripper_pos = None
             return
@@ -566,54 +630,85 @@ class RobotController:
             self._gripper_pos = None
 
     def gripper_jog(self, direction: str) -> Tuple[bool, str]:
+        """
+        Manual gripper control used by:
+          POST /api/robot/gripper  {"action": "open|close"}
+
+        IMPORTANT:
+        - We validate return codes (not only exceptions).
+        - On failure we mark gripper unavailable so UI/worker can stop assuming success.
+        """
         with self._lock:
             ok, msg = self._is_motion_allowed()
             if not ok:
                 return False, msg
 
-            if not self._gripper_available:
-                return False, "Gripper not available."
+            if self._arm is None:
+                return False, "Not connected."
+
+            d = (direction or "").strip().lower()
+            if d not in ("open", "close"):
+                return False, "action must be open|close"
+
+            ok_g, msg_g = self._ensure_gripper_enabled()
+            if not ok_g:
+                return False, msg_g
 
             self._refresh_gripper_cache()
             cur = self._gripper_pos
             if cur is None:
+                # If we can't read pos, still attempt from mid-range
                 cur = (CONFIG.gripper_min + CONFIG.gripper_max) // 2
 
-            step = CONFIG.gripper_step
-            if direction == "open":
-                target = min(CONFIG.gripper_max, cur + step)
-            elif direction == "close":
-                target = max(CONFIG.gripper_min, cur - step)
-            else:
-                return False, "action must be open|close"
+            step = int(CONFIG.gripper_step)
+            if d == "open":
+                target = min(int(CONFIG.gripper_max), int(cur) + step)
+            else:  # close
+                target = max(int(CONFIG.gripper_min), int(cur) - step)
+
+            if not hasattr(self._arm, "set_gripper_position"):
+                self._mark_gripper_unavailable()
+                return False, "SDK has no set_gripper_position."
 
             try:
-                if hasattr(self._arm, "set_gripper_position"):
-                    code = self._arm.set_gripper_position(target, wait=False)  # type: ignore[union-attr]
-                    if isinstance(code, int) and code != 0:
-                        return False, f"set_gripper_position failed code={code}"
-                else:
-                    return False, "SDK has no set_gripper_position."
-                self._gripper_pos = target
+                code = self._arm.set_gripper_position(int(target), wait=False)  # type: ignore[union-attr]
+                if isinstance(code, int) and code != 0:
+                    self._mark_gripper_unavailable()
+                    return False, f"set_gripper_position failed code={code}"
+
+                self._gripper_available = True
+                self._gripper_pos = int(target)
                 return True, "OK"
+
             except Exception as e:
+                self._mark_gripper_unavailable()
                 return False, f"Gripper failed: {e}"
 
     def gripper_status(self) -> Dict[str, Any]:
+        """
+        Used by:
+          GET /api/robot/gripper/status
+        """
         with self._lock:
+            # If connected but gripper flag is false, we can still try a best-effort enable/read
+            # so manual UI sees the real state after plug/unplug.
+            if self._arm is not None and not self._gripper_available:
+                self._ensure_gripper_enabled()
+
             self._refresh_gripper_cache()
             pos = self._gripper_pos
             pct = None
             if pos is not None:
-                denom = max(1, CONFIG.gripper_max - CONFIG.gripper_min)
-                pct = int(round((pos - CONFIG.gripper_min) * 100.0 / denom))
+                denom = max(1, int(CONFIG.gripper_max) - int(CONFIG.gripper_min))
+                pct = int(round((int(pos) - int(CONFIG.gripper_min)) * 100.0 / denom))
                 pct = max(0, min(100, pct))
+
             return {
-                "available": self._gripper_available,
+                "available": bool(self._gripper_available),
                 "pos": pos,
                 "pct": pct,
-                "min": CONFIG.gripper_min,
-                "max": CONFIG.gripper_max,
+                "min": int(CONFIG.gripper_min),
+                "max": int(CONFIG.gripper_max),
             }
 
     # -------------------------
