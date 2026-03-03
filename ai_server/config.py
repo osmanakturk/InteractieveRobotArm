@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Dict, Optional
 
 
+_BASE_DIR = Path(__file__).resolve().parent
+
+
 @dataclass(frozen=True)
 class PickAndPlaceConfig:
     # Gateway base URL is passed via env: GATEWAY_URL
@@ -35,12 +38,12 @@ class PickAndPlaceConfig:
     return_to_vision_pose_on_cancel: bool = True     # also go back if cancel happens
     return_to_vision_pose_on_error: bool = True      # also go back on exceptions
 
-    # Models
-    yolo_model_name: str = "models/yolo26x-seg.pt"
-    ggcnn_weight_path: str = "ggcnn_weights.pt"
+    # Models (ABSOLUTE paths for reliability)
+    yolo_model_name: str = str(_BASE_DIR / "models" / "yolo26x-seg.pt")
+    ggcnn_weight_path: str = str(_BASE_DIR / "ggcnn_weights.pt")
 
-    # Homography
-    homography_file: str = "H_img2base.npy"
+    # Homography (ABSOLUTE path for reliability)
+    homography_file: str = str(_BASE_DIR / "H_img2base.npy")
 
     # Measurements / safety
     table_z_mm: float = 183.195312
@@ -74,8 +77,6 @@ class PickAndPlaceConfig:
 
     # Optional: verify grasp via gripper position feedback
     verify_grasp_via_gripper: bool = True
-    # Heuristic: after closing, if actual position stays ABOVE closed_pos by this much,
-    # it likely means an object blocks the gripper => grasped.
     grasped_pos_delta: int = 60
     gripper_tolerance: int = 20
     gripper_max_steps: int = 80

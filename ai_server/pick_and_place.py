@@ -8,7 +8,7 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Literal
 
 import cv2
 import httpx
@@ -18,7 +18,6 @@ import torch
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from skimage.draw import disk
 from skimage.feature import peak_local_max
 
 from config import CONFIG
@@ -31,6 +30,10 @@ PPC = CONFIG.pick_and_place
 PICKPLACE_HOST = (os.environ.get("PICKPLACE_API_HOST") or "127.0.0.1").strip()
 PICKPLACE_PORT = int((os.environ.get("PICKPLACE_API_PORT") or "9011").strip())
 
+
+# -------------------------
+# Helpers
+# -------------------------
 def normalize_any_http(input_value: str) -> str:
     raw = (input_value or "").strip()
     if not raw:
@@ -39,11 +42,12 @@ def normalize_any_http(input_value: str) -> str:
         return raw.rstrip("/")
     return f"http://{raw}".rstrip("/")
 
+
 GATEWAY_URL = normalize_any_http(os.environ.get("GATEWAY_URL", ""))
 if not GATEWAY_URL:
     raise RuntimeError("GATEWAY_URL is empty. Start via ai_server/main.py with gateway_url")
 
-# ---- GGCNN import (your structure)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import models.ggcnn2  # noqa
 from models.ggcnn2 import GGCNN2  # noqa
@@ -88,10 +92,16 @@ class GatewayApi:
         return r.json()
 
     def robot_enable(self) -> None:
-        self.client.post(self._url(PPC.robot_enable_path))
+        try:
+            self.client.post(self._url(PPC.robot_enable_path))
+        except Exception:
+            pass
 
     def robot_stop(self) -> None:
-        self.client.post(self._url(PPC.robot_stop_path))
+        try:
+            self.client.post(self._url(PPC.robot_stop_path))
+        except Exception:
+            pass
 
     def robot_move_pose(
         self, x: float, y: float, z: float, roll: float, pitch: float, yaw: float, speed: int, wait: bool = True
@@ -111,19 +121,13 @@ class GatewayApi:
             r = self.client.post(self._url(path), json=body)
             if r.status_code == 200:
                 return True, "OK"
-            return False, f"{path} http={r.status_code}"
+            try:
+                j = r.json()
+                return False, f"{path} http={r.status_code} {j}"
+            except Exception:
+                return False, f"{path} http={r.status_code}"
         except Exception as e:
             return False, f"{path} error: {e}"
-
-    def gripper_status(self) -> Dict[str, Any]:
-        r = self.client.get(self._url(PPC.gripper_status_path))
-        if r.status_code != 200:
-            return {"available": False}
-        data = r.json()
-        return data.get("gripper", {}) if isinstance(data, dict) else {"available": False}
-
-    def gripper_jog(self, action: str) -> None:
-        self.client.post(self._url(PPC.gripper_jog_path), json={"action": action})
 
 
 # -------------------------
@@ -133,8 +137,10 @@ def safe_z(z: float) -> float:
     min_z = float(PPC.table_z_mm + PPC.clearance_mm)
     return max(min_z, float(z))
 
+
 def normalize_deg(a: float) -> float:
     return (a + 180.0) % 360.0 - 180.0
+
 
 def load_homography() -> Optional[np.ndarray]:
     f = PPC.homography_file
@@ -147,11 +153,13 @@ def load_homography() -> Optional[np.ndarray]:
             return None
     return None
 
+
 def project_xy(H: np.ndarray, u: float, v: float) -> Tuple[float, float]:
     p = np.array([u, v, 1.0], dtype=np.float64)
     q = H @ p
     q = q / q[2]
     return float(q[0]), float(q[1])
+
 
 def recover_robot(gw: GatewayApi) -> None:
     try:
@@ -163,47 +171,29 @@ def recover_robot(gw: GatewayApi) -> None:
     except Exception:
         pass
 
-def go_vision_pose(gw: GatewayApi) -> None:
-    gw.robot_enable()
-    ok, msg = gw.robot_move_pose(
-        x=PPC.vision_x,
-        y=PPC.vision_y,
-        z=PPC.vision_z,
-        roll=PPC.vision_roll,
-        pitch=PPC.vision_pitch,
-        yaw=PPC.vision_yaw,
-        speed=PPC.speed_move,
-        wait=True,
-    )
-    if not ok:
-        raise RuntimeError(msg)
 
-def ensure_gripper_position(gw: GatewayApi, target: int) -> None:
-    for _ in range(int(PPC.gripper_max_steps)):
-        st = gw.gripper_status()
-        if not st.get("available"):
-            gw.gripper_jog("close" if target <= PPC.gripper_closed_pos else "open")
-            time.sleep(float(PPC.gripper_step_sleep_s))
-            return
+# -------------------------
+# Cancellation
+# -------------------------
+_cancel_event = threading.Event()
 
-        pos = st.get("pos")
-        if pos is None:
-            gw.gripper_jog("close" if target <= PPC.gripper_closed_pos else "open")
-            time.sleep(float(PPC.gripper_step_sleep_s))
-            continue
 
-        pos_i = int(pos)
-        if abs(pos_i - int(target)) <= int(PPC.gripper_tolerance):
-            return
+def _cancel_requested() -> bool:
+    return _cancel_event.is_set()
 
-        gw.gripper_jog("open" if pos_i < target else "close")
-        time.sleep(float(PPC.gripper_step_sleep_s))
+
+def _set_cancel(v: bool) -> None:
+    if v:
+        _cancel_event.set()
+    else:
+        _cancel_event.clear()
 
 
 # -------------------------
 # GGCNN
 # -------------------------
 _prev_mp = np.array([150, 150], dtype=np.int64)
+
 
 def process_depth_image(depth_m: np.ndarray, out_size: int = 300):
     depth = depth_m.copy()
@@ -227,6 +217,7 @@ def process_depth_image(depth_m: np.ndarray, out_size: int = 300):
     invalid = cv2.resize(invalid, (out_size, out_size), cv2.INTER_NEAREST)
     return depth_inp, invalid
 
+
 def load_ggcnn_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weight_path = os.path.join(SCRIPT_DIR, PPC.ggcnn_weight_path)
@@ -234,6 +225,7 @@ def load_ggcnn_model():
     model = torch.load(weight_path, map_location=device, weights_only=False)
     model.to(device).eval()
     return model, device
+
 
 def ggcnn_infer(depth_crop_m: np.ndarray, model, device, out_size: int):
     global _prev_mp
@@ -279,6 +271,9 @@ def ggcnn_infer(depth_crop_m: np.ndarray, model, device, out_size: int):
 # -------------------------
 # Worker state
 # -------------------------
+Phase = Literal["WAIT_PICK", "WAIT_PLACE"]
+
+
 @dataclass
 class SelectionData:
     id: str
@@ -293,107 +288,151 @@ class SelectionData:
     place_z: float
     created_at: float
 
+
 _lock = threading.Lock()
 _busy = False
 _last_error: str = ""
 _last_selection: Optional[SelectionData] = None
+_phase: Phase = "WAIT_PICK"
+_picked_done: bool = False  # <--- critical: manual flow latch
 
-def _set_busy(v: bool):
+
+def _set_busy(v: bool) -> None:
     global _busy
     with _lock:
-        _busy = v
+        _busy = bool(v)
+
+
+def _try_set_busy_true() -> bool:
+    global _busy
+    with _lock:
+        if _busy:
+            return False
+        _busy = True
+        return True
+
 
 def _get_busy() -> bool:
     with _lock:
         return bool(_busy)
 
-def _set_err(msg: str):
+
+def _set_err(msg: str) -> None:
     global _last_error
     with _lock:
-        _last_error = msg[:300]
+        _last_error = (msg or "")[:300]
+
 
 def _get_err() -> str:
     with _lock:
         return _last_error
 
-def _set_selection(sel: SelectionData):
+
+def _set_selection(sel: Optional[SelectionData]) -> None:
     global _last_selection
     with _lock:
         _last_selection = sel
+
 
 def _get_selection() -> Optional[SelectionData]:
     with _lock:
         return _last_selection
 
 
+def _get_phase() -> Phase:
+    with _lock:
+        return _phase
+
+
+def _set_phase(p: Phase) -> None:
+    global _phase
+    with _lock:
+        _phase = p
+
+
+def _get_picked_done() -> bool:
+    with _lock:
+        return bool(_picked_done)
+
+
+def _set_picked_done(v: bool) -> None:
+    global _picked_done
+    with _lock:
+        _picked_done = bool(v)
+
+
 # -------------------------
-# Robot actions
+# MANUAL FLOW ACTION
 # -------------------------
-def perform_pick_or_place(gw: GatewayApi, x: float, y: float, z: float, yaw_deg: float, action: str):
-    cancelled = False
+def perform_move_and_hold(gw: GatewayApi, x: float, y: float, z: float, yaw_deg: float) -> bool:
+    """
+    Manual flow:
+      - recover (stop+enable)
+      - move to XY at vision Z
+      - descend to target Z
+      - HOLD (no gripper, no ascend, no auto-return)
+    """
     try:
         recover_robot(gw)
+
+        if _cancel_requested():
+            _set_err("cancelled")
+            return False
+
         z = safe_z(z)
 
-        ok, _ = gw.robot_move_pose(
-            x=x, y=y, z=PPC.vision_z,
-            roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
-            speed=PPC.speed_move, wait=True
+        ok, msg = gw.robot_move_pose(
+            x=x,
+            y=y,
+            z=float(PPC.vision_z),
+            roll=float(PPC.vision_roll),
+            pitch=float(PPC.vision_pitch),
+            yaw=float(yaw_deg),
+            speed=int(PPC.speed_move),
+            wait=True,
         )
         if not ok:
-            cancelled = True
-            return
+            _set_err(f"move XY failed: {msg}")
+            return False
 
-        if PPC.dry_run_xy_only:
-            return
+        if _cancel_requested():
+            _set_err("cancelled")
+            return False
+
+        if bool(PPC.dry_run_xy_only):
+            return True
 
         drop = float(PPC.vision_z) - float(z)
         if drop > float(PPC.max_drop_mm):
-            cancelled = True
-            return
+            _set_err(f"drop too large: {drop:.1f}mm > max_drop_mm={float(PPC.max_drop_mm):.1f}")
+            return False
 
-        ok, _ = gw.robot_move_pose(
-            x=x, y=y, z=z,
-            roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
-            speed=PPC.speed_descend, wait=True
+        ok, msg = gw.robot_move_pose(
+            x=x,
+            y=y,
+            z=float(z),
+            roll=float(PPC.vision_roll),
+            pitch=float(PPC.vision_pitch),
+            yaw=float(yaw_deg),
+            speed=int(PPC.speed_descend),
+            wait=True,
         )
         if not ok:
-            cancelled = True
-            return
+            _set_err(f"descend failed: {msg}")
+            return False
 
-        if action.upper() == "PICK":
-            ensure_gripper_position(gw, PPC.gripper_closed_pos)
-            time.sleep(0.2)
-            gw.robot_move_pose(
-                x=x, y=y, z=PPC.vision_z,
-                roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
-                speed=PPC.speed_ascend, wait=True
-            )
-        else:
-            ensure_gripper_position(gw, PPC.gripper_open_pos)
-            time.sleep(0.2)
-            gw.robot_move_pose(
-                x=x, y=y, z=PPC.vision_z,
-                roll=PPC.vision_roll, pitch=PPC.vision_pitch, yaw=yaw_deg,
-                speed=PPC.speed_ascend, wait=True
-            )
+        return True
+
     except Exception as e:
-        cancelled = True
         _set_err(f"action failed: {e}")
-    finally:
-        try:
-            if cancelled and PPC.return_to_vision_pose_on_error:
-                go_vision_pose(gw)
-            elif (not cancelled) and PPC.return_to_vision_pose_after_action:
-                go_vision_pose(gw)
-        except Exception:
-            pass
+        return False
 
 
 # -------------------------
 # FastAPI
 # -------------------------
-app = FastAPI(title="pick_and_place_worker", version="1.0.0")
+app = FastAPI(title="pick_and_place_worker", version="2.1.0-manual-synced")
+
 
 class SelectBody(BaseModel):
     u: float = Field(..., ge=0.0, le=1.0)
@@ -401,36 +440,97 @@ class SelectBody(BaseModel):
     source: str = "realsense_mjpeg"
     ts: Optional[int] = None
 
+
 class ExecuteBody(BaseModel):
     action: str = Field(..., description="pick|place")
     selection_id: str
 
+
+class SyncBody(BaseModel):
+    phase: Phase
+    picked_done: Optional[bool] = None
+
+
 @app.get("/health")
 def health():
-    return JSONResponse({"ok": True, "service": "pick_and_place_worker", "busy": _get_busy(), "error": _get_err()})
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": "pick_and_place_worker",
+            "busy": _get_busy(),
+            "phase": _get_phase(),
+            "picked_done": _get_picked_done(),
+            "error": _get_err(),
+        }
+    )
+
 
 @app.get("/status")
 def status():
     sel = _get_selection()
-    return JSONResponse({
-        "ok": True,
-        "busy": _get_busy(),
-        "error": _get_err(),
-        "selection": (sel.__dict__ if sel else None),
-    })
+    return JSONResponse(
+        {
+            "ok": True,
+            "busy": _get_busy(),
+            "phase": _get_phase(),
+            "picked_done": _get_picked_done(),
+            "error": _get_err(),
+            "selection": (sel.__dict__ if sel else None),
+        }
+    )
+
+
+@app.post("/sync")
+def sync(body: SyncBody):
+    if _get_busy():
+        return JSONResponse(status_code=409, content={"ok": False, "message": "robot is busy"})
+    _set_phase(body.phase)
+    if body.picked_done is not None:
+        _set_picked_done(bool(body.picked_done))
+    return JSONResponse({"ok": True, "phase": _get_phase(), "picked_done": _get_picked_done()})
+
+
+@app.post("/cancel")
+def cancel():
+    _set_cancel(True)
+    try:
+        gw = GatewayApi(GATEWAY_URL, timeout_s=float(PPC.http_timeout_s))
+        try:
+            gw.robot_stop()
+        finally:
+            gw.close()
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "message": "cancel requested"})
+
+
+@app.post("/reset")
+def reset():
+    if _get_busy():
+        return JSONResponse(status_code=409, content={"ok": False, "message": "robot is busy"})
+
+    _set_cancel(False)
+    _set_err("")
+    _set_selection(None)
+    _set_phase("WAIT_PICK")
+    _set_picked_done(False)
+    return JSONResponse({"ok": True, "message": "reset done", "phase": _get_phase(), "picked_done": _get_picked_done()})
+
 
 @app.post("/select")
 def select(body: SelectBody):
     if _get_busy():
         return JSONResponse(status_code=409, content={"ok": False, "message": "robot is busy"})
 
+    _set_cancel(False)
+
+    gw: Optional[GatewayApi] = None
     try:
         gw = GatewayApi(GATEWAY_URL, timeout_s=float(PPC.http_timeout_s))
         gw.ensure_camera_started()
 
-        # Stream is 4:3; assume 640x480 (matches your UI)
-        px = int(round(body.u * 640))
-        py = int(round(body.v * 480))
+        px = int(round(float(body.u) * 640))
+        py = int(round(float(body.v) * 480))
         px = max(0, min(639, px))
         py = max(0, min(479, py))
 
@@ -452,7 +552,6 @@ def select(body: SelectBody):
 
         depth_crop_m = depth_u16.astype(np.float32) * depth_scale
 
-        # model load (cache globally)
         if not hasattr(select, "_model"):
             m, d = load_ggcnn_model()
             setattr(select, "_model", m)
@@ -475,7 +574,7 @@ def select(body: SelectBody):
         tx, ty = project_xy(H, u_full, v_full)
 
         yaw_target = float(PPC.vision_yaw)
-        if PPC.enable_auto_yaw:
+        if bool(PPC.enable_auto_yaw):
             yaw_target = normalize_deg(
                 float(PPC.vision_yaw) + float(PPC.yaw_sign) * float(g["angle_deg"]) + float(PPC.yaw_offset_deg)
             )
@@ -487,9 +586,12 @@ def select(body: SelectBody):
 
         sel = SelectionData(
             id=sid,
-            u=float(body.u), v=float(body.v),
-            pixel_x=px, pixel_y=py,
-            tx=float(tx), ty=float(ty),
+            u=float(body.u),
+            v=float(body.v),
+            pixel_x=px,
+            pixel_y=py,
+            tx=float(tx),
+            ty=float(ty),
             yaw_deg=float(yaw_target),
             pick_z=float(pick_z),
             place_z=float(place_z),
@@ -498,15 +600,16 @@ def select(body: SelectBody):
         _set_selection(sel)
         _set_err("")
 
-        return JSONResponse({"ok": True, "selection": {"id": sid, "u": sel.u, "v": sel.v, "tx": sel.tx, "ty": sel.ty, "yaw_deg": sel.yaw_deg}})
+        return JSONResponse(
+            {"ok": True, "selection": {"id": sid, "u": sel.u, "v": sel.v, "tx": sel.tx, "ty": sel.ty, "yaw_deg": sel.yaw_deg}}
+        )
     except Exception as e:
         _set_err(str(e))
         return JSONResponse(status_code=500, content={"ok": False, "message": f"select failed: {e}"})
     finally:
-        try:
-            gw.close()  # type: ignore[name-defined]
-        except Exception:
-            pass
+        if gw is not None:
+            gw.close()
+
 
 @app.post("/execute")
 def execute(body: ExecuteBody):
@@ -514,37 +617,73 @@ def execute(body: ExecuteBody):
     if act not in ("pick", "place"):
         return JSONResponse(status_code=400, content={"ok": False, "message": "action must be pick|place"})
 
-    if _get_busy():
+    if not _try_set_busy_true():
         return JSONResponse(status_code=409, content={"ok": False, "message": "robot is busy"})
+
+    _set_cancel(False)
+
+    # ---- order check based on picked_done (robust against phase drift)
+    picked_done = _get_picked_done()
+    if act == "pick" and picked_done:
+        _set_busy(False)
+        return JSONResponse(status_code=409, content={"ok": False, "message": "invalid order: already picked (expected place)"})
+    if act == "place" and (not picked_done):
+        _set_busy(False)
+        return JSONResponse(status_code=409, content={"ok": False, "message": "invalid order: expected pick (no pick latched)"})
 
     sel = _get_selection()
     if not sel or sel.id != body.selection_id:
+        _set_busy(False)
         return JSONResponse(status_code=404, content={"ok": False, "message": "selection not found"})
 
+    # reflect phase (mostly UI hint)
+    _set_phase("WAIT_PLACE" if _get_picked_done() else "WAIT_PICK")
+
     def _run():
-        _set_busy(True)
+        gw: Optional[GatewayApi] = None
+        ok_action = False
         try:
             gw = GatewayApi(GATEWAY_URL, timeout_s=float(PPC.http_timeout_s))
-            # Always stabilize to vision pose first
-            go_vision_pose(gw)
             time.sleep(float(PPC.stabilize_sleep_s))
 
             z = sel.pick_z if act == "pick" else sel.place_z
-            perform_pick_or_place(gw, sel.tx, sel.ty, z, sel.yaw_deg, act.upper())
+            ok_action = perform_move_and_hold(gw, sel.tx, sel.ty, z, sel.yaw_deg)
+
         except Exception as e:
             _set_err(f"execute failed: {e}")
         finally:
-            try:
-                gw.close()  # type: ignore[name-defined]
-            except Exception:
-                pass
+            if gw is not None:
+                try:
+                    gw.close()
+                except Exception:
+                    pass
+
             _set_busy(False)
+
+            # latch update if succeeded
+            if ok_action and (not _cancel_requested()):
+                if act == "pick":
+                    _set_picked_done(True)
+                    _set_phase("WAIT_PLACE")
+                else:
+                    _set_picked_done(False)
+                    _set_phase("WAIT_PICK")
 
     th = threading.Thread(target=_run, daemon=True)
     th.start()
 
-    return JSONResponse({"ok": True, "message": f"{act} started", "selection_id": sel.id})
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": f"{act} started (manual gripper)",
+            "selection_id": sel.id,
+            "phase": _get_phase(),
+            "picked_done": _get_picked_done(),
+        }
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host=PICKPLACE_HOST, port=PICKPLACE_PORT, access_log=True)

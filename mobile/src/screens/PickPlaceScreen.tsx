@@ -94,10 +94,10 @@ function IconBtn({
         tone === "primary"
           ? styles.iconBtnPrimary
           : tone === "danger"
-            ? styles.iconBtnDanger
-            : tone === "success"
-              ? styles.iconBtnSuccess
-              : null,
+          ? styles.iconBtnDanger
+          : tone === "success"
+          ? styles.iconBtnSuccess
+          : null,
         disabled ? { opacity: 0.45 } : null,
         pressed && !disabled ? { opacity: 0.9 } : null,
       ]}
@@ -280,12 +280,12 @@ export default function PickPlaceScreen({ navigation, route }: any) {
   const aiDot: DotStatus = !gatewayBase
     ? "idle"
     : !gatewayUp
-      ? "error"
-      : aiConnected
-        ? "connected"
-        : aiConfigured
-          ? "error"
-          : "idle";
+    ? "error"
+    : aiConnected
+    ? "connected"
+    : aiConfigured
+    ? "error"
+    : "idle";
 
   // API helpers (Gateway)
   const apiPost = useCallback(
@@ -342,11 +342,10 @@ export default function PickPlaceScreen({ navigation, route }: any) {
   );
 
   const waitAiWorkerIdle = useCallback(
-    async (timeoutMs: number = 15000) => {
+    async (timeoutMs: number = 20000) => {
       const t0 = Date.now();
       while (Date.now() - t0 < timeoutMs) {
         const st = await aiGet("/api/ai_server/pick_place/status");
-        // expected: { ok:true, busy:boolean, phase:string, ... }
         const busy = !!st?.busy;
         if (!busy) return st;
         await sleep(150);
@@ -391,10 +390,10 @@ export default function PickPlaceScreen({ navigation, route }: any) {
         typeof g.available === "boolean"
           ? g.available
           : typeof g.connected === "boolean"
-            ? g.connected
-            : typeof g.gripper_pct === "number" || typeof g.pct === "number"
-              ? true
-              : false;
+          ? g.connected
+          : typeof g.gripper_pct === "number" || typeof g.pct === "number"
+          ? true
+          : false;
 
       setGripperAvailable(available);
 
@@ -407,10 +406,10 @@ export default function PickPlaceScreen({ navigation, route }: any) {
         typeof g.gripper_pct === "number"
           ? g.gripper_pct
           : typeof g.pct === "number"
-            ? g.pct
-            : typeof g.percent === "number"
-              ? g.percent
-              : 0;
+          ? g.pct
+          : typeof g.percent === "number"
+          ? g.percent
+          : 0;
 
       setGripperPct(clamp(Math.round(pct), 0, 100));
     } catch {
@@ -541,33 +540,35 @@ export default function PickPlaceScreen({ navigation, route }: any) {
     [apiPost, refreshGripperStatus]
   );
 
-const hardResetWorkflow = useCallback(async () => {
-  setSelection(null);
-  setSelecting(false);
-  setAiLoading(false);
-  setPhase("idle");
-  setHasPicked(false);
+  const hardResetWorkflow = useCallback(async () => {
+    setSelection(null);
+    setSelecting(false);
+    setAiLoading(false);
+    setPhase("idle");
+    setHasPicked(false);
 
-  // best-effort: stop robot motion (important)
-  try { await apiPost("/api/robot/stop"); } catch {}
+    // best-effort: stop robot motion (important)
+    try {
+      await apiPost("/api/robot/stop");
+    } catch {}
 
-  if (!aiBase) return;
+    if (!aiBase) return;
 
-  try { await aiPost("/api/ai_server/pick_place/cancel"); return; } catch {}
-  try { await aiPost("/api/ai_server/pick_place/reset"); return; } catch {}
-}, [aiBase, aiPost, apiPost]);
+    // best-effort: cancel/reset AI worker
+    try {
+      await aiPost("/api/ai_server/pick_place/cancel");
+      return;
+    } catch {}
+    try {
+      await aiPost("/api/ai_server/pick_place/reset");
+      return;
+    } catch {}
+  }, [aiBase, aiPost, apiPost]);
 
   const onStop = useCallback(async () => {
     endHoldJog();
-    // STOP should also kill workflow
     await hardResetWorkflow();
-
-    //try {
-    //  await apiPost("/api/robot/stop");
-    //} catch (e: any) {
-    //  Alert.alert("STOP failed", e?.message || "Stop failed.");
-    //}
-  }, [apiPost, endHoldJog, hardResetWorkflow]);
+  }, [endHoldJog, hardResetWorkflow]);
 
   const onEnableDisable = useCallback(async () => {
     try {
@@ -649,6 +650,7 @@ const hardResetWorkflow = useCallback(async () => {
     try {
       await aiPost("/api/ai_server/modes/start", { mode: "pick_and_place", gateway_url: gatewayBase });
       await refreshAiStatus();
+
       // starting AI should reset workflow state
       setSelection(null);
       setPhase("idle");
@@ -711,6 +713,38 @@ const hardResetWorkflow = useCallback(async () => {
     [aiBase, aiPost]
   );
 
+  // --- IMPORTANT: keep AI worker phase in sync BEFORE arming pick/place
+  const ensureWorkerPhase = useCallback(
+    async (want: "pick" | "place") => {
+      if (!aiBase) throw new Error("AI Server not set.");
+
+      const st = await aiGet("/api/ai_server/pick_place/status");
+      const busy = !!st?.busy;
+      if (busy) throw new Error("AI worker is busy. Please wait.");
+
+      const workerPhase = String(st?.phase || "");
+      const expectPhase = want === "pick" ? "WAIT_PICK" : "WAIT_PLACE";
+
+      if (workerPhase && workerPhase !== expectPhase) {
+        // Auto-fix: reset worker to WAIT_PICK to avoid "invalid order" surprises.
+        await aiPost("/api/ai_server/pick_place/reset");
+        const st2 = await aiGet("/api/ai_server/pick_place/status");
+        const p2 = String(st2?.phase || "");
+        if (want === "pick" && p2 !== "WAIT_PICK") {
+          throw new Error(`AI worker phase mismatch after reset: got ${p2}`);
+        }
+        if (want === "place" && p2 !== "WAIT_PLACE") {
+          // If user wants place but worker is WAIT_PICK, that's still OK as long as UI hasPicked gates it.
+          // We keep it strict to match your "no errors" requirement:
+          throw new Error(`AI worker is not ready for place (phase=${p2}). Do Pick first.`);
+        }
+      }
+
+      return st;
+    },
+    [aiBase, aiGet, aiPost]
+  );
+
   const executePickPlace = useCallback(
     async (action: "pick" | "place", u: number, v: number, px: number, py: number) => {
       if (!aiModeActive) throw new Error("AI mode is not running.");
@@ -718,6 +752,11 @@ const hardResetWorkflow = useCallback(async () => {
       if (!gatewayBase) throw new Error("Gateway not set.");
       if (!robotConnected) throw new Error("Robot not connected.");
       if (!enabled) throw new Error("Robot is disabled.");
+
+      if (action === "place" && !hasPicked) throw new Error("Place not ready. Do Pick first.");
+
+      // ensure worker phase is correct to prevent invalid order
+      await ensureWorkerPhase(action);
 
       endHoldJog();
       setPhase("busy");
@@ -739,26 +778,20 @@ const hardResetWorkflow = useCallback(async () => {
         });
 
         // 3) IMPORTANT: wait until worker is not busy
-        await waitAiWorkerIdle(20000);
+        await waitAiWorkerIdle(25000);
 
         // 4) MANUAL FLOW: DO NOT auto-return to vision here
-        // (remove vision_pose call entirely)
+        // (user presses Vision manually)
 
         // 5) Update workflow flags
-        if (action === "pick") {
-          // pick motion completed (robot is now at pick pose and HOLDING in manual flow)
-          setHasPicked(true);
-        } else {
-          // place motion completed
-          setHasPicked(false);
-        }
+        if (action === "pick") setHasPicked(true);
+        else setHasPicked(false);
 
         setSelection(null);
         setPhase("idle");
       } finally {
         setSelecting(false);
         setAiLoading(false);
-        
       }
     },
     [
@@ -767,7 +800,9 @@ const hardResetWorkflow = useCallback(async () => {
       aiPost,
       enabled,
       endHoldJog,
+      ensureWorkerPhase,
       gatewayBase,
+      hasPicked,
       postSelectionToAi,
       robotConnected,
       waitAiWorkerIdle,
@@ -804,9 +839,10 @@ const hardResetWorkflow = useCallback(async () => {
       try {
         await executePickPlace(action, mapped.u, mapped.v, locationX, locationY);
       } catch (e: any) {
-        // If AI says "invalid order expected pick wait pick" => force full reset.
         const msg = String(e?.message || "");
-        if (msg.includes("invalid order") || msg.includes("expected pick")) {
+
+        // If AI says invalid order => full reset (no user pain)
+        if (msg.includes("invalid order") || msg.includes("expected pick") || msg.includes("expected place")) {
           await hardResetWorkflow();
           Alert.alert("Order error", "AI state was out of sync. Workflow reset. Please Pick again.");
           return;
@@ -834,26 +870,44 @@ const hardResetWorkflow = useCallback(async () => {
 
   const onClearSelection = useCallback(() => setSelection(null), []);
 
-  const onArmPick = useCallback(() => {
+  const onArmPick = useCallback(async () => {
     if (!aiModeActive) return Alert.alert("AI not running", "Start AI first.");
     if (!cameraStarted) return Alert.alert("Camera off", "Start camera first.");
     if (!robotConnected) return Alert.alert("Robot not connected", "Connect robot first.");
     if (!enabled) return Alert.alert("Robot disabled", "Enable robot first.");
+    if (!aiBase) return;
+
+    try {
+      // Always ensure worker is WAIT_PICK when arming pick (prevents invalid order)
+      await ensureWorkerPhase("pick");
+    } catch (e: any) {
+      Alert.alert("Pick not ready", String(e?.message || "AI worker not ready."));
+      return;
+    }
 
     setSelection(null);
     setPhase("pick_armed");
-  }, [aiModeActive, cameraStarted, enabled, robotConnected]);
+  }, [aiModeActive, aiBase, cameraStarted, enabled, ensureWorkerPhase, robotConnected]);
 
-  const onArmPlace = useCallback(() => {
+  const onArmPlace = useCallback(async () => {
     if (!hasPicked) return Alert.alert("Pick required", "You must complete a Pick before placing.");
     if (!aiModeActive) return Alert.alert("AI not running", "Start AI first.");
     if (!cameraStarted) return Alert.alert("Camera off", "Start camera first.");
     if (!robotConnected) return Alert.alert("Robot not connected", "Connect robot first.");
     if (!enabled) return Alert.alert("Robot disabled", "Enable robot first.");
+    if (!aiBase) return;
+
+    try {
+      // Worker should be WAIT_PLACE after a successful pick execute
+      await ensureWorkerPhase("place");
+    } catch (e: any) {
+      Alert.alert("Place not ready", String(e?.message || "AI worker not ready for place."));
+      return;
+    }
 
     setSelection(null);
     setPhase("place_armed");
-  }, [aiModeActive, cameraStarted, enabled, hasPicked, robotConnected]);
+  }, [aiModeActive, aiBase, cameraStarted, enabled, ensureWorkerPhase, hasPicked, robotConnected]);
 
   // Cancel MUST stop everything
   const onCancelWorkflow = useCallback(async () => {
@@ -861,8 +915,8 @@ const hardResetWorkflow = useCallback(async () => {
   }, [hardResetWorkflow]);
 
   // Layout
-  const leftW = useMemo(() => clamp(Math.round(width * 0.20), 240, 310), [width]);
-  const rightW = useMemo(() => clamp(Math.round(width * 0.20), 240, 310), [width]);
+  const leftW = useMemo(() => clamp(Math.round(width * 0.2), 240, 310), [width]);
+  const rightW = useMemo(() => clamp(Math.round(width * 0.2), 240, 310), [width]);
 
   if (!isLandscape) {
     return (
@@ -873,7 +927,7 @@ const hardResetWorkflow = useCallback(async () => {
     );
   }
 
-  // Jog lock: ONLY when workflow is active (your requirement)
+  // Jog lock: ONLY when workflow is active
   const workflowLocked = phase !== "idle";
   const jogLocked = workflowLocked || selecting || aiLoading;
   const canControl = !!gatewayBase && robotConnected && !jogLocked;
@@ -908,10 +962,10 @@ const hardResetWorkflow = useCallback(async () => {
     if (!cameraStarted) return "Start camera first.";
     if (!enabled) return "Enable robot first.";
 
-    if (phase === "pick_armed") return "Pick armed → tap camera to pick.";
-    if (phase === "place_armed") return "Place armed → tap camera to place.";
+    if (phase === "pick_armed") return "Pick armed → tap camera to pick (robot will HOLD).";
+    if (phase === "place_armed") return "Place armed → tap camera to place (robot will HOLD).";
     if (phase === "busy") return "Working… Please wait.";
-    if (hasPicked) return "Pick done ✓ Now press Place, then tap camera.";
+    if (hasPicked) return "Pick done ✓ (manual grip) → press Vision → press Place → tap camera.";
     return "Press Pick, then tap camera.";
   }, [aiModeActive, cameraStarted, enabled, gatewayBase, hasPicked, phase, robotConnected]);
 
@@ -921,7 +975,7 @@ const hardResetWorkflow = useCallback(async () => {
     if (phase === "pick_armed") return "Tap to PICK";
     if (phase === "place_armed") return "Tap to PLACE";
     if (phase === "busy") return "Working…";
-    if (hasPicked) return "Press Place to continue";
+    if (hasPicked) return "Press Vision then Place";
     return "Press Pick to start";
   }, [aiModeActive, cameraStarted, hasPicked, phase]);
 
@@ -947,7 +1001,14 @@ const hardResetWorkflow = useCallback(async () => {
               />
 
               {/* Vision is MANUAL always */}
-              <IconBtn icon="eye-outline" label="Vision" tone="primary" onPress={onVisionPose} disabled={!canRobotToggle} size="sm" />
+              <IconBtn
+                icon="eye-outline"
+                label="Vision"
+                tone="primary"
+                onPress={onVisionPose}
+                disabled={!canRobotToggle}
+                size="sm"
+              />
             </View>
 
             <View style={styles.topDots}>
@@ -984,7 +1045,7 @@ const hardResetWorkflow = useCallback(async () => {
                 label={robotBtnLabel}
                 tone={robotBtnTone}
                 onPress={onEnableDisable}
-                disabled={!gatewayBase || !robotConnected || phase !== "idle"} // safer: enable/disable only idle
+                disabled={!gatewayBase || !robotConnected || phase !== "idle"}
                 size="sm"
               />
             </View>
@@ -1002,8 +1063,18 @@ const hardResetWorkflow = useCallback(async () => {
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 14 }}>
               <BarCard title="Speed" rightText={`${speedPct}%`} valuePct={speedPct} />
               <View style={styles.speedBtnsRow}>
-                <IconBtn icon="minus" label="Speed" onPress={() => pushSpeed(speedPct - 5)} disabled={!gatewayBase || workflowLocked} />
-                <IconBtn icon="plus" label="Speed" onPress={() => pushSpeed(speedPct + 5)} disabled={!gatewayBase || workflowLocked} />
+                <IconBtn
+                  icon="minus"
+                  label="Speed"
+                  onPress={() => pushSpeed(speedPct - 5)}
+                  disabled={!gatewayBase || workflowLocked}
+                />
+                <IconBtn
+                  icon="plus"
+                  label="Speed"
+                  onPress={() => pushSpeed(speedPct + 5)}
+                  disabled={!gatewayBase || workflowLocked}
+                />
               </View>
 
               <View style={{ marginTop: 12 }}>
@@ -1020,6 +1091,8 @@ const hardResetWorkflow = useCallback(async () => {
                   {selection.selectionId ? "✓" : selecting ? "(sending…)" : ""}
                 </Text>
               ) : null}
+
+              <Text style={styles.note}>Gripper: {gripperRightText}</Text>
             </ScrollView>
           </View>
 
@@ -1111,7 +1184,14 @@ const hardResetWorkflow = useCallback(async () => {
               <View style={styles.jogMidRow}>
                 <HoldBtn label="Y+" disabled={!canControl} onHoldStart={() => startHoldJog("y", +1)} onHoldEnd={endHoldJog} />
                 <View style={styles.jogCenter}>
-                  <IconBtn icon="eye-outline" label="" tone="primary" onPress={onVisionPose} disabled={!gatewayBase || !robotConnected} size="sm" />
+                  <IconBtn
+                    icon="eye-outline"
+                    label=""
+                    tone="primary"
+                    onPress={onVisionPose}
+                    disabled={!gatewayBase || !robotConnected}
+                    size="sm"
+                  />
                 </View>
                 <HoldBtn label="Y-" disabled={!canControl} onHoldStart={() => startHoldJog("y", -1)} onHoldEnd={endHoldJog} />
               </View>
@@ -1144,11 +1224,27 @@ const hardResetWorkflow = useCallback(async () => {
                 </View>
 
                 <View style={{ flexDirection: "row", justifyContent: "space-evenly" }}>
-                  <IconBtn icon="crosshairs-gps" label="Clear Sel" onPress={onClearSelection} disabled={!selection || phase === "busy"} size="md" tone="danger" />
-                  <IconBtn icon="close-circle-outline" label="Cancel" onPress={onCancelWorkflow} disabled={phase === "busy"} size="md" tone="ghost" />
+                  <IconBtn
+                    icon="crosshairs-gps"
+                    label="Clear Sel"
+                    onPress={onClearSelection}
+                    disabled={!selection || phase === "busy"}
+                    size="md"
+                    tone="danger"
+                  />
+                  <IconBtn
+                    icon="close-circle-outline"
+                    label="Cancel"
+                    onPress={onCancelWorkflow}
+                    disabled={phase === "busy"}
+                    size="md"
+                    tone="ghost"
+                  />
                 </View>
 
-                {hasPicked && phase === "idle" && <Text style={styles.note}>Pick completed. Press Place, then tap camera.</Text>}
+                {hasPicked && phase === "idle" && (
+                  <Text style={styles.note}>Pick completed. Press Vision, then Place, then tap camera.</Text>
+                )}
               </View>
             </ScrollView>
           </View>
@@ -1158,7 +1254,7 @@ const hardResetWorkflow = useCallback(async () => {
         {leftOpen && (
           <View style={styles.drawerOverlay}>
             <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setLeftOpen(false)} />
-            <View style={[styles.drawer, { left: 12, width: clamp(Math.round(width * 0.40), 320, 560) }]}>
+            <View style={[styles.drawer, { left: 12, width: clamp(Math.round(width * 0.4), 320, 560) }]}>
               <View style={styles.drawerHeader}>
                 <Text style={styles.drawerTitle}>Status</Text>
                 <IconBtn icon="close" onPress={() => setLeftOpen(false)} />
@@ -1239,7 +1335,7 @@ const hardResetWorkflow = useCallback(async () => {
         {rightOpen && (
           <View style={styles.drawerOverlay}>
             <Pressable style={StyleSheet.absoluteFillObject} onPress={() => setRightOpen(false)} />
-            <View style={[styles.drawer, { right: 12, width: clamp(Math.round(width * 0.40), 320, 560) }]}>
+            <View style={[styles.drawer, { right: 12, width: clamp(Math.round(width * 0.4), 320, 560) }]}>
               <View style={styles.drawerHeader}>
                 <Text style={styles.drawerTitle}>Settings</Text>
                 <IconBtn icon="close" onPress={() => setRightOpen(false)} />
@@ -1252,11 +1348,18 @@ const hardResetWorkflow = useCallback(async () => {
                     <TelemetryRow k="Robot connected" v={robotConnected ? "Yes" : "No"} />
                     <TelemetryRow k="Enabled" v={enabled ? "Yes" : "No"} />
                     <TelemetryRow k="Workflow" v={`${phase}${hasPicked ? " (picked)" : ""}`} />
-                    <TelemetryRow k="Selection" v={selection ? `u=${selection.u.toFixed(2)} v=${selection.v.toFixed(2)}` : "-"} />
+                    <TelemetryRow
+                      k="Selection"
+                      v={selection ? `u=${selection.u.toFixed(2)} v=${selection.v.toFixed(2)}` : "-"}
+                    />
                   </View>
 
-                  {!!(live as any)?.safety?.message && <Text style={styles.drawerHint}>Safety message: {String((live as any).safety.message)}</Text>}
-                  {!!(live as any)?.camera?.last_error && <Text style={styles.drawerHint}>Camera error: {String((live as any).camera.last_error)}</Text>}
+                  {!!(live as any)?.safety?.message && (
+                    <Text style={styles.drawerHint}>Safety message: {String((live as any).safety.message)}</Text>
+                  )}
+                  {!!(live as any)?.camera?.last_error && (
+                    <Text style={styles.drawerHint}>Camera error: {String((live as any).camera.last_error)}</Text>
+                  )}
                 </View>
 
                 <View style={styles.drawerCard}>
@@ -1282,7 +1385,12 @@ const hardResetWorkflow = useCallback(async () => {
                       onPress={onEnableDisable}
                       disabled={!gatewayBase || !robotConnected || phase !== "idle"}
                     />
-                    <IconBtn icon="shield-alert-outline" label="Clear Safety" onPress={onClearSafety} disabled={!gatewayBase || phase !== "idle"} />
+                    <IconBtn
+                      icon="shield-alert-outline"
+                      label="Clear Safety"
+                      onPress={onClearSafety}
+                      disabled={!gatewayBase || phase !== "idle"}
+                    />
                     <IconBtn icon="home" label="Home" onPress={onRobotHome} disabled={!gatewayBase || !robotConnected || phase !== "idle"} />
                     <IconBtn icon="eye-outline" label="Vision" onPress={onVisionPose} disabled={!gatewayBase || !robotConnected} />
                   </View>
