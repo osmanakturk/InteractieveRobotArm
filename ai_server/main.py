@@ -246,5 +246,47 @@ def pick_place_execute(body: PickExecuteBody):
         return JSONResponse(status_code=503, content={"ok": False, "message": f"pick_place worker unavailable: {e}"})
 
 
+@app.post("/api/ai_server/pick_place/cancel")
+def pick_place_cancel():
+    err = _ensure_pickplace_running()
+    if err:
+        return JSONResponse(status_code=400, content={"ok": False, "message": err})
+
+    try:
+        with httpx.Client(timeout=3.0) as c:
+            r = c.post(_pickplace_url("/cancel"))
+            return JSONResponse(status_code=r.status_code, content=r.json())
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"pick_place worker unavailable: {e}"})
+
+
+@app.post("/api/ai_server/pick_place/reset")
+def pick_place_reset():
+    err = _ensure_pickplace_running()
+    if err:
+        return JSONResponse(status_code=400, content={"ok": False, "message": err})
+
+    try:
+        with httpx.Client(timeout=3.0) as c:
+            r = c.post(_pickplace_url("/reset"))
+            return JSONResponse(status_code=r.status_code, content=r.json())
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"pick_place worker unavailable: {e}"})
+
+
+@app.get("/api/ai_server/pick_place/status")
+def pick_place_status():
+    err = _ensure_pickplace_running()
+    if err:
+        return JSONResponse(status_code=400, content={"ok": False, "message": err})
+
+    try:
+        with httpx.Client(timeout=2.0) as c:
+            r = c.get(_pickplace_url("/status"))
+            return JSONResponse(status_code=r.status_code, content=r.json())
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"pick_place worker unavailable: {e}"})
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host=CONFIG.host, port=CONFIG.port)
