@@ -1,5 +1,5 @@
-// src/screens/ModelSelectionScreen.tsx
-import React, { useMemo } from "react";
+// src/screens/ModeSelectionScreen.tsx
+import React, { useMemo, useCallback } from "react";
 import {
   Alert,
   Image,
@@ -29,38 +29,48 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
 
   const { gateway, robot, aiserver } = useConnection();
 
-  useFocusEffect(
-    React.useCallback(() => {
-      if (!autoNavigateTo) return;
-
-      navigation.setParams({ autoNavigateTo: undefined });
-
-      setTimeout(() => {
-        handleTilePress(autoNavigateTo);
-      }, 0);
-    }, [autoNavigateTo])
-  );
-
-  const { columns, tileW, tileH } = useMemo(() => {
-    const cols = isLandscape ? 3 : 2;
-    const screenPadding = 22 * 2;
-    const cardPadding = 18 * 2;
-    const usable = width - screenPadding - cardPadding;
-    const gap = 10;
-    const w = Math.floor((usable - gap * (cols - 1)) / cols);
-    const tileWidth = Math.max(120, Math.min(w, 175));
-    const tileHeight = Math.floor(tileWidth * 0.82);
-    return { columns: cols, tileW: tileWidth, tileH: tileHeight };
-  }, [width, isLandscape]);
-
   const tiles: TileItem[] = useMemo(
     () => [
-      { title: "Manual Control", subtitle: "Direction buttons / jog", routeName: "Manual", icon: require("../../assets/manual.png") },
-      { title: "Pick & Place Control", subtitle: "Touch to pick & place", routeName: "PickPlace", icon: require("../../assets/pickplace.png") },
-      { title: "Voice Control", subtitle: "Speech commands", routeName: "Voice", icon: require("../../assets/voice.png") },
+      {
+        title: "Manual Control",
+        subtitle: "Direction buttons / jog",
+        routeName: "Manual",
+        icon: require("../../assets/manual.png"),
+      },
+      {
+        title: "Pick & Place Control",
+        subtitle: "Touch to pick & place",
+        routeName: "PickPlace",
+        icon: require("../../assets/pickplace.png"),
+      },
+      // Voice is optional for later (keep as comment)
+      // {
+      //   title: "Voice Control",
+      //   subtitle: "Speech commands",
+      //   routeName: "Voice",
+      //   icon: require("../../assets/voice.png"),
+      // },
     ],
     []
   );
+
+  // IMPORTANT: columns must respect how many tiles exist
+  const { columns, tileW, tileH } = useMemo(() => {
+    const desiredCols = isLandscape ? 3 : 2;
+    const cols = Math.min(desiredCols, tiles.length); // <= FIX: prevents 3-col layout with 2 tiles
+
+    const screenPadding = 22 * 2;
+    const cardPadding = 18 * 2;
+    const usable = width - screenPadding - cardPadding;
+
+    const gap = 12; // slightly larger, more stable spacing
+    const w = Math.floor((usable - gap * (cols - 1)) / Math.max(cols, 1));
+
+    const tileWidth = clamp(Math.floor(w), 150, 210);
+    const tileHeight = Math.floor(tileWidth * 0.84);
+
+    return { columns: cols, tileW: tileWidth, tileH: tileHeight };
+  }, [width, isLandscape, tiles.length]);
 
   const rows = useMemo(() => {
     const r: TileItem[][] = [];
@@ -68,50 +78,72 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
     return r;
   }, [tiles, columns]);
 
-  const goToConnectionHub = (selected: ConnKey, nextRoute: TileItem["routeName"]) => {
-    navigation.navigate("ConnectionHub", {
-      selected,
-      nextRoute,
-      returnTo: "ModeSelect",
-      gateway: gateway.value,
-      robot: robot.value,
-      aiserver: aiserver.value,
-    });
-  };
+  const goToConnectionHub = useCallback(
+    (selected: ConnKey, nextRoute: TileItem["routeName"]) => {
+      navigation.navigate("ConnectionHub", {
+        selected,
+        nextRoute,
+        returnTo: "ModeSelect",
+        gateway: gateway.value,
+        robot: robot.value,
+        aiserver: aiserver.value,
+      });
+    },
+    [navigation, gateway.value, robot.value, aiserver.value]
+  );
 
-  const showMissingAlert = (missing: ConnKey, nextRoute: TileItem["routeName"]) => {
-    const titles: Record<ConnKey, string> = {
-      gateway: "Gateway required",
-      robot: "Robot required",
-      aiserver: "AI Server required",
-    };
+  const showMissingAlert = useCallback(
+    (missing: ConnKey, nextRoute: TileItem["routeName"]) => {
+      const titles: Record<ConnKey, string> = {
+        gateway: "Gateway required",
+        robot: "Robot required",
+        aiserver: "AI Server required",
+      };
 
-    const messages: Record<ConnKey, string> = {
-      gateway: "Please enter the Gateway address first. The app communicates only with the Gateway.",
-      robot: "Please enter the Robot IP. The Gateway needs it to connect and control the xArm.",
-      aiserver: "Pick & Place and Voice require an AI Server address (AI models).",
-    };
+      const messages: Record<ConnKey, string> = {
+        gateway: "Please enter the Gateway address first. The app communicates only with the Gateway.",
+        robot: "Please enter the Robot IP. The Gateway needs it to connect and control the xArm.",
+        aiserver: "Pick & Place and Voice require an AI Server address (AI models).",
+      };
 
-    Alert.alert(titles[missing], messages[missing], [
-      { text: "Cancel", style: "cancel" },
-      { text: "OK", onPress: () => goToConnectionHub(missing, nextRoute) },
-    ]);
-  };
+      Alert.alert(titles[missing], messages[missing], [
+        { text: "Cancel", style: "cancel" },
+        { text: "OK", onPress: () => goToConnectionHub(missing, nextRoute) },
+      ]);
+    },
+    [goToConnectionHub]
+  );
 
-  const handleTilePress = (routeName: TileItem["routeName"]) => {
-    if (!gateway.value.trim()) return showMissingAlert("gateway", routeName);
-    if (!robot.value.trim()) return showMissingAlert("robot", routeName);
+  const handleTilePress = useCallback(
+    (routeName: TileItem["routeName"]) => {
+      if (!gateway.value.trim()) return showMissingAlert("gateway", routeName);
+      if (!robot.value.trim()) return showMissingAlert("robot", routeName);
 
-    if ((routeName === "PickPlace" || routeName === "Voice") && !aiserver.value.trim()) {
-      return showMissingAlert("aiserver", routeName);
-    }
+      if ((routeName === "PickPlace" || routeName === "Voice") && !aiserver.value.trim()) {
+        return showMissingAlert("aiserver", routeName);
+      }
 
-    navigation.navigate(routeName, {
-      gateway: gateway.value,
-      robot: robot.value,
-      aiserver: aiserver.value,
-    });
-  };
+      navigation.navigate(routeName, {
+        gateway: gateway.value,
+        robot: robot.value,
+        aiserver: aiserver.value,
+      });
+    },
+    [aiserver.value, gateway.value, navigation, robot.value, showMissingAlert]
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!autoNavigateTo) return;
+
+      navigation.setParams({ autoNavigateTo: undefined });
+
+      // run next tick
+      setTimeout(() => {
+        handleTilePress(autoNavigateTo);
+      }, 0);
+    }, [autoNavigateTo, handleTilePress, navigation])
+  );
 
   const Tile = ({ title, subtitle, routeName, icon }: TileItem) => (
     <Pressable
@@ -127,8 +159,12 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
       </View>
 
       <View style={styles.tileContent}>
-        <Text style={styles.tileTitle} numberOfLines={1}>{title}</Text>
-        <Text style={styles.tileSubtitle} numberOfLines={2}>{subtitle}</Text>
+        <Text style={styles.tileTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        <Text style={styles.tileSubtitle} numberOfLines={2}>
+          {subtitle}
+        </Text>
       </View>
     </Pressable>
   );
@@ -144,24 +180,22 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
           {!!gateway.value && (
             <View style={styles.badge}>
               <Text style={styles.badgeText} numberOfLines={1}>
-                Gateway: {gateway.status === "connected" ? "OK" : "Set"} • Robot: {robot.status === "connected" ? "OK" : robot.value ? "Set" : "Missing"} • AI:{" "}
+                Gateway: {gateway.status === "connected" ? "OK" : "Set"} • Robot:{" "}
+                {robot.status === "connected" ? "OK" : robot.value ? "Set" : "Missing"} • AI:{" "}
                 {aiserver.status === "connected" ? "OK" : aiserver.value ? "Set" : "Optional"}
               </Text>
             </View>
           )}
 
+          {/* GRID */}
           <View style={styles.gridWrap}>
             {rows.map((row, idx) => (
-              <View key={idx} style={styles.row}>
+              <View key={idx} style={[styles.row, { columnGap: 12 }]}>
                 {row.map((t) => (
-                  <View key={t.routeName} style={styles.cell}>
+                  <View key={t.routeName} style={[styles.cell, { width: tileW }]}>
                     <Tile {...t} />
                   </View>
                 ))}
-                {row.length < columns &&
-                  Array.from({ length: columns - row.length }).map((_, i) => (
-                    <View key={`empty-${idx}-${i}`} style={[styles.cell, { width: tileW }]} />
-                  ))}
               </View>
             ))}
           </View>
@@ -182,6 +216,10 @@ export default function ModeSelectionScreen({ navigation, route }: any) {
   );
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
 const styles = StyleSheet.create({
   bg: { flex: 1 },
   dim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(8, 12, 22, 0.68)" },
@@ -195,8 +233,9 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.10)",
     maxWidth: 760,
     alignSelf: "center",
-    width: "100%",
+    width: "90%",
   },
+
   title: { color: "white", fontSize: 26, fontWeight: "800" },
   subtitle: { color: "rgba(255,255,255,0.70)", marginTop: 6 },
 
@@ -213,9 +252,21 @@ const styles = StyleSheet.create({
   },
   badgeText: { color: "rgba(255,255,255,0.75)", fontSize: 12, fontWeight: "700" },
 
-  gridWrap: { marginTop: 16 },
-  row: { flexDirection: "row", justifyContent: "center", marginBottom: 10 },
-  cell: { marginHorizontal: 5 },
+  // FIX: Grid now behaves like a centered "block", not a weird nested centering
+  gridWrap: {
+    marginTop: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  row: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "stretch",
+    marginBottom: 12,
+  },
+  cell: {
+    // width is injected dynamically to avoid shrinking / drifting
+  },
 
   tile: {
     borderRadius: 16,
@@ -228,12 +279,16 @@ const styles = StyleSheet.create({
 
   tileImageArea: {
     flex: 1,
-    padding: 0,
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: "rgba(5, 10, 22, 0.20)",
+    paddingHorizontal: 10,
   },
-  tileImage: { width: "100%" },
+  // FIX: prevent the image from forcing layout / overflowing
+  tileImage: {
+    width: "92%",
+    height: "92%",
+  },
 
   tileContent: {
     paddingHorizontal: 12,

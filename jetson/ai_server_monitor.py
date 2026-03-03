@@ -34,6 +34,14 @@ class AiMonitor:
         async with self._lock:
             self._client = client
 
+    async def get_base_url(self) -> str:
+        """
+        Single source of truth for gateway proxy:
+        returns normalized configured base URL, e.g. "http://10.2.172.118:9000"
+        """
+        async with self._lock:
+            return self._configured_url or ""
+
     async def configure_and_connect(self, url: str) -> Tuple[bool, str]:
         url = normalize_any_http(url)
         if not url:

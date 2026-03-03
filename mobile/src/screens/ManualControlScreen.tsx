@@ -87,6 +87,7 @@ function IconBtn({
   );
 }
 
+
 function Row({ children }: { children: React.ReactNode }) {
   return <View style={styles.row}>{children}</View>;
 }
@@ -172,6 +173,7 @@ function TelemetryRow({ k, v }: { k: string; v: string }) {
     </View>
   );
 }
+
 
 export default function ManualControlScreen({ navigation, route }: any) {
   const { width, height } = useWindowDimensions();
@@ -283,6 +285,15 @@ export default function ManualControlScreen({ navigation, route }: any) {
     },
     [gatewayBase]
   );
+
+    // Vision pose (recommended gateway endpoint)
+  const onVisionPose = useCallback(async () => {
+    try {
+      await apiPost("/api/robot/vision_pose");
+    } catch {
+      Alert.alert("Vision pose missing", "Add endpoint: POST /api/robot/vision_pose in gateway (recommended).");
+    }
+  }, [apiPost, gatewayBase]);
 
   const refreshCameraStatus = useCallback(async () => {
     if (!gatewayBase) return;
@@ -930,6 +941,9 @@ export default function ManualControlScreen({ navigation, route }: any) {
                       onPress={onRobotHome}
                       disabled={!gatewayBase || !robotConnected}
                     />
+
+                    <IconBtn icon="eye-outline" label="Vision" onPress={onVisionPose} disabled={!canRobotToggle} />
+
                   </View>
 
                   {(safetyLimit || safetyMsg) && (
