@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -98,7 +98,7 @@ _http_client: Optional[httpx.AsyncClient] = None
 async def lifespan(app: FastAPI):
     global _ai_task, _http_client
 
-    _http_client = httpx.AsyncClient(timeout=1.5)
+    _http_client = httpx.AsyncClient(timeout=5.0)
     await ai.set_client(_http_client)
 
     _ai_task = asyncio.create_task(ai_watchdog_loop(ai, interval_s=1.0))
@@ -149,6 +149,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# -------------------------
+# BASIC HEALTH (mobile/monitor expects this)
+# -------------------------
+@app.get("/health")
+def health():
+    return ok({"service": "jetson_gateway", "message": "alive"})
 
 
 @app.get("/api/status")
@@ -313,7 +321,6 @@ def api_robot_safety_clear():
 
 @app.post("/api/robot/vision_pose")
 def api_robot_vision_pose():
-    # FIX: CONFIG.robot.vision_pose (dataclass)
     vp = CONFIG.robot.vision_pose
     success, msg = robot.move_pose(
         x=vp.x,
@@ -331,7 +338,7 @@ def api_robot_vision_pose():
 
 
 # -------------------------
-# AI SERVER
+# AI SERVER connect/disconnect
 # -------------------------
 @app.post("/api/ai_server/connect")
 async def api_ai_connect(body: AiServerBody):
@@ -345,6 +352,71 @@ async def api_ai_connect(body: AiServerBody):
 async def api_ai_disconnect():
     await ai.disconnect()
     return ok({"message": "AI server disconnected.", "ai_server": await ai.status()})
+
+
+# -------------------------
+# AI SERVER proxy helpers (mobile expects these on gateway too)
+# -------------------------
+async def _ai_base_url() -> str:
+    # Single truth: AiMonitor.status()["url"] (configured base URL)
+    st = await ai.status()
+    url = (st.get("url") or "").strip() if isinstance(st, dict) else ""
+    return url.rstrip("/") if url else ""
+
+
+async def _proxy_ai(method: str, path: str, payload: Optional[dict] = None):
+    if _http_client is None:
+        return fail("HTTP client not ready", status=503)
+
+    base = await _ai_base_url()
+    if not base:
+        return fail("AI server not connected/configured", status=400)
+
+    url = f"{base}{path}"
+    try:
+        if method == "GET":
+            r = await _http_client.get(url)
+        else:
+            r = await _http_client.post(url, json=(payload or {}))
+
+        try:
+            data = r.json()
+        except Exception:
+            data = {"ok": False, "message": "invalid JSON from AI server", "raw": r.text}
+
+        return JSONResponse(status_code=r.status_code, content=data)
+    except Exception as e:
+        return fail(f"AI proxy failed: {e}", status=503)
+
+
+@app.get("/api/ai_server/modes/status")
+async def gw_ai_modes_status():
+    return await _proxy_ai("GET", "/api/ai_server/modes/status")
+
+
+@app.post("/api/ai_server/pick_place/select")
+async def gw_pick_place_select(payload: dict = Body(default={})):
+    return await _proxy_ai("POST", "/api/ai_server/pick_place/select", payload)
+
+
+@app.post("/api/ai_server/pick_place/execute")
+async def gw_pick_place_execute(payload: dict = Body(default={})):
+    return await _proxy_ai("POST", "/api/ai_server/pick_place/execute", payload)
+
+
+@app.post("/api/ai_server/pick_place/cancel")
+async def gw_pick_place_cancel(payload: dict = Body(default={})):
+    return await _proxy_ai("POST", "/api/ai_server/pick_place/cancel", payload)
+
+
+@app.post("/api/ai_server/pick_place/reset")
+async def gw_pick_place_reset(payload: dict = Body(default={})):
+    return await _proxy_ai("POST", "/api/ai_server/pick_place/reset", payload)
+
+
+@app.get("/api/ai_server/pick_place/status")
+async def gw_pick_place_status():
+    return await _proxy_ai("GET", "/api/ai_server/pick_place/status")
 
 
 # -------------------------
