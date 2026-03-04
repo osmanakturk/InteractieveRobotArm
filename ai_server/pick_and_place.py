@@ -410,7 +410,7 @@ def perform_move_and_hold(gw: GatewayApi, x: float, y: float, z: float, yaw_deg:
             pitch=float(PPC.vision_pitch),
             yaw=float(yaw_deg),
             speed=int(PPC.speed_move),
-            wait=True,
+            wait=False,
         )
         if not ok:
             _set_err(f"move XY failed: {msg}")
@@ -436,7 +436,7 @@ def perform_move_and_hold(gw: GatewayApi, x: float, y: float, z: float, yaw_deg:
             pitch=float(PPC.vision_pitch),
             yaw=float(yaw_deg),
             speed=int(PPC.speed_descend),
-            wait=True,
+            wait=False,
         )
         if not ok:
             _set_err(f"descend failed: {msg}")

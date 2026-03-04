@@ -1235,9 +1235,8 @@ const canGrip = !!gatewayBase && robotConnected && !aiLoading && !selecting;
                   />
                 </View>
 
-                <View style={{ flexDirection: "row", justifyContent: "space-evenly" }}>
-                  <IconBtn icon="crosshairs-gps" label="Clear Sel" onPress={onClearSelection} disabled={!selection || phase === "busy"} size="md" tone="danger" />
-                  <IconBtn icon="close-circle-outline" label="Cancel" onPress={onCancelWorkflow} disabled={phase === "busy"} size="md" tone="ghost" />
+                <View style={{ flexDirection: "row", justifyContent: "center" }}>
+                  <IconBtn icon="close-circle-outline" label="Cancel" onPress={onCancelWorkflow} disabled={phase === "busy"} size="md" tone="danger" />
                 </View>
 
                 {phase === "pick_hold" && <Text style={styles.note}>Robot is at pick pose. Use Gripper to confirm Pick.</Text>}
