@@ -69,7 +69,7 @@ class RobotMovePoseBody(BaseModel):
     pitch: float
     yaw: float
     speed: int = Field(120, ge=1, le=2000)
-    wait: bool = True
+    wait: bool = False
 
 
 class GripperBody(BaseModel):

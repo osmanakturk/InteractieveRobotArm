@@ -88,7 +88,7 @@ class PickAndPlaceConfig:
     yaw_offset_deg: float = 0.0
 
     # Network
-    http_timeout_s: float = 3.0
+    http_timeout_s: float = 10.0
 
     # UI
     window_name: str = "pick_and_place"

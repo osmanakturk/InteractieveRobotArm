@@ -1,3 +1,4 @@
+# ai_server/pick_and_place.py
 from __future__ import annotations
 
 import base64
@@ -294,7 +295,27 @@ _busy = False
 _last_error: str = ""
 _last_selection: Optional[SelectionData] = None
 _phase: Phase = "WAIT_PICK"
-_picked_done: bool = False  # <--- critical: manual flow latch
+_picked_done: bool = False  # manual flow latch (optional; UI may ignore)
+_last_action: Optional[str] = None  # "pick" | "place"
+_last_action_ok: Optional[bool] = None
+_last_action_ts: Optional[float] = None
+
+
+def _set_last_action(action: str, ok: Optional[bool]) -> None:
+    global _last_action, _last_action_ok, _last_action_ts
+    with _lock:
+        _last_action = action
+        _last_action_ok = ok
+        _last_action_ts = time.time()
+
+
+def _get_last_action() -> Dict[str, Any]:
+    with _lock:
+        return {
+            "action": _last_action,
+            "ok": _last_action_ok,
+            "ts": _last_action_ts,
+        }
 
 
 def _set_busy(v: bool) -> None:
@@ -461,6 +482,7 @@ def health():
             "phase": _get_phase(),
             "picked_done": _get_picked_done(),
             "error": _get_err(),
+            "last_action": _get_last_action(),
         }
     )
 
@@ -476,6 +498,7 @@ def status():
             "picked_done": _get_picked_done(),
             "error": _get_err(),
             "selection": (sel.__dict__ if sel else None),
+            "last_action": _get_last_action(),
         }
     )
 
@@ -514,7 +537,19 @@ def reset():
     _set_selection(None)
     _set_phase("WAIT_PICK")
     _set_picked_done(False)
-    return JSONResponse({"ok": True, "message": "reset done", "phase": _get_phase(), "picked_done": _get_picked_done()})
+
+    # IMPORTANT: also reset last_action so UI doesn't read stale info
+    _set_last_action("", None)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": "reset done",
+            "phase": _get_phase(),
+            "picked_done": _get_picked_done(),
+            "last_action": _get_last_action(),
+        }
+    )
 
 
 @app.post("/select")
@@ -540,7 +575,9 @@ def select(body: SelectBody):
 
         pack = gw.get_grasp_pack(px, py, int(PPC.crop_size))
         if not pack.get("valid"):
-            return JSONResponse(status_code=503, content={"ok": False, "message": pack.get("message", "grasp_pack invalid")})
+            return JSONResponse(
+                status_code=503, content={"ok": False, "message": pack.get("message", "grasp_pack invalid")}
+            )
 
         depth_scale = float(pack["depth_scale"])
         origin = pack["crop_origin"]
@@ -601,7 +638,11 @@ def select(body: SelectBody):
         _set_err("")
 
         return JSONResponse(
-            {"ok": True, "selection": {"id": sid, "u": sel.u, "v": sel.v, "tx": sel.tx, "ty": sel.ty, "yaw_deg": sel.yaw_deg}}
+            {
+                "ok": True,
+                "selection": {"id": sid, "u": sel.u, "v": sel.v, "tx": sel.tx, "ty": sel.ty, "yaw_deg": sel.yaw_deg},
+                "last_action": _get_last_action(),
+            }
         )
     except Exception as e:
         _set_err(str(e))
@@ -622,22 +663,15 @@ def execute(body: ExecuteBody):
 
     _set_cancel(False)
 
-    # ---- order check based on picked_done (robust against phase drift)
-    picked_done = _get_picked_done()
-    if act == "pick" and picked_done:
-        _set_busy(False)
-        return JSONResponse(status_code=409, content={"ok": False, "message": "invalid order: already picked (expected place)"})
-    if act == "place" and (not picked_done):
-        _set_busy(False)
-        return JSONResponse(status_code=409, content={"ok": False, "message": "invalid order: expected pick (no pick latched)"})
-
     sel = _get_selection()
     if not sel or sel.id != body.selection_id:
+        _set_err("selection not found")
+        _set_last_action(act, False)
         _set_busy(False)
-        return JSONResponse(status_code=404, content={"ok": False, "message": "selection not found"})
+        return JSONResponse(status_code=404, content={"ok": False, "message": "selection not found", "last_action": _get_last_action()})
 
-    # reflect phase (mostly UI hint)
-    _set_phase("WAIT_PLACE" if _get_picked_done() else "WAIT_PICK")
+    _set_err("")
+    _set_last_action(act, None)
 
     def _run():
         gw: Optional[GatewayApi] = None
@@ -659,8 +693,9 @@ def execute(body: ExecuteBody):
                     pass
 
             _set_busy(False)
+            _set_last_action(act, bool(ok_action and (not _cancel_requested())))
 
-            # latch update if succeeded
+            # latch update if succeeded (optional; UI may ignore)
             if ok_action and (not _cancel_requested()):
                 if act == "pick":
                     _set_picked_done(True)
@@ -679,6 +714,7 @@ def execute(body: ExecuteBody):
             "selection_id": sel.id,
             "phase": _get_phase(),
             "picked_done": _get_picked_done(),
+            "last_action": _get_last_action(),
         }
     )
 
