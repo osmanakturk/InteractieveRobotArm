@@ -9,7 +9,6 @@ import ManualControlScreen from "./src/screens/ManualControlScreen";
 import PickPlaceScreen from "./src/screens/PickPlaceScreen";
 import VoiceControlScreen from "./src/screens/VoiceControlScreen";
 import { ConnectionProvider } from './src/connection/ConnectionContext';
-import TestScreen from "./src/screens/TestScreen";
 
 
 
@@ -22,7 +21,6 @@ export default function App() {
     <ConnectionProvider>
     <NavigationContainer>
       <Stack.Navigator initialRouteName="Splash" screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="Test" component={TestScreen} />
         <Stack.Screen name="Splash" component={SplashScreen} />
         <Stack.Screen name="ConnectionHub" component={ConnectionHubScreen} />
         <Stack.Screen name="ModeSelect" component={ModeSelectionScreen} />
