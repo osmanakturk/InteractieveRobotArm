@@ -9,7 +9,7 @@ Thumbs.db
 
 # Logs / dumps / reports
 *.log
-
+*.zip
 *.tar
 *.tar.gz
 *.7z
