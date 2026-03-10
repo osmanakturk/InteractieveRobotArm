@@ -20,10 +20,16 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.osmanaktrk.InteractieveRobotArm"
     },
     "web": {
       "favicon": "./assets/robot_icon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "36af244a-e1ef-4393-8cc9-e8ab2260f078"
+      }
     }
   }
 }
