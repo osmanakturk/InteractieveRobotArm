@@ -1,6 +1,6 @@
 // src/screens/SplashScreen.tsx
 import React, { useEffect, useRef } from "react";
-import { Image, StyleSheet, View } from "react-native";
+import { Image, StyleSheet, View, Text } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export const STORAGE_KEYS = {
@@ -23,7 +23,7 @@ export default function SplashScreen({ navigation }: any) {
           STORAGE_KEYS.aiserver,
         ]);
       } catch {
-        // sessiz
+        // silent
       }
 
       await new Promise((r) => setTimeout(r, 1200));
@@ -44,12 +44,37 @@ export default function SplashScreen({ navigation }: any) {
 
   return (
     <View style={styles.container}>
-      <Image source={require("../../assets/splash.jpg")} style={styles.image} resizeMode="cover" />
+      <Image
+        source={require("../../assets/splash.jpg")}
+        style={styles.image}
+        resizeMode="cover"
+      />
+
+      <Text style={styles.signature}>
+        Developed by Osman Akturk
+      </Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "black" },
-  image: { flex: 1, width: "100%" },
+  container: {
+    flex: 1,
+    backgroundColor: "black",
+  },
+
+  image: {
+    flex: 1,
+    width: "100%",
+  },
+
+  signature: {
+    position: "absolute",
+    bottom: 20,
+    alignSelf: "center",
+    color: "black",
+    fontSize: 16,
+    opacity: 0.8,
+    letterSpacing: 1
+  },
 });

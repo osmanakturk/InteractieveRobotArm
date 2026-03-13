@@ -54,6 +54,9 @@ type ConnectionContextValue = {
 
 const ConnectionContext = createContext<ConnectionContextValue | null>(null);
 
+const CONNECT_TIMEOUT_MS = 5000;
+const DISCONNECT_TIMEOUT_MS = 3000;
+
 function normalizeBaseUrl(input: string) {
   const raw = (input || "").trim();
   if (!raw) return "";
@@ -67,6 +70,37 @@ function gatewayToWsUrl(gatewayHttpUrl: string) {
   return `${wsProto}//${u.host}/ws/status`;
 }
 
+async function fetchJsonWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = CONNECT_TIMEOUT_MS
+) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const resp = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    return { resp, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function toFriendlyErrorMessage(error: any, fallback: string) {
+  if (error?.name === "AbortError") {
+    return "Connection timed out.";
+  }
+  if (typeof error?.message === "string" && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+}
+
 export function ConnectionProvider({ children }: { children: React.ReactNode }) {
   const [gateway, setGateway] = useState<ConnState>({ value: "", status: "idle" });
   const [robot, setRobot] = useState<ConnState>({ value: "", status: "idle" });
@@ -78,7 +112,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<any>(null);
   const reconnectAttemptsRef = useRef(0);
-
   const intentionalCloseRef = useRef(false);
 
   const clearReconnectTimer = () => {
@@ -124,7 +157,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       lastOkAt: Date.now(),
     }));
 
-    // Robot
     const st = data?.status || {};
     const robotConnected = !!st.connected;
     setRobot((s) => ({
@@ -134,7 +166,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       lastOkAt: robotConnected ? Date.now() : s.lastOkAt,
     }));
 
-    // AI
     const ai = data?.ai_server || {};
     const aiConfigured = !!ai.configured;
     const aiConnected = !!ai.connected;
@@ -158,11 +189,16 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       wsRef.current = ws;
 
       ws.onopen = () => {
-        intentionalCloseRef.current = false; 
+        intentionalCloseRef.current = false;
         setWsConnected(true);
         reconnectAttemptsRef.current = 0;
 
-        setGateway((s) => ({ ...s, status: "connected", message: undefined, lastOkAt: Date.now() }));
+        setGateway((s) => ({
+          ...s,
+          status: "connected",
+          message: undefined,
+          lastOkAt: Date.now(),
+        }));
       };
 
       ws.onmessage = (ev) => {
@@ -183,7 +219,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         setWsConnected(false);
 
         if (intentionalCloseRef.current) return;
-
         scheduleReconnect(baseHttp);
       };
     } catch {
@@ -207,11 +242,6 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
         if (gwV) setGateway((s) => ({ ...s, value: gwV }));
         if (rbV) setRobot((s) => ({ ...s, value: rbV }));
         if (aiV) setAiServer((s) => ({ ...s, value: aiV }));
-
-        //if (gwV) {
-        //  const base = normalizeBaseUrl(gwV);
-        //  startWs(base);
-        //}
       } catch {}
     })();
 
@@ -228,12 +258,7 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       setGateway((s) => ({ ...s, status: "idle", message: undefined }));
       setRobot((s) => ({ ...s, status: "idle", message: undefined }));
       setAiServer((s) => ({ ...s, status: "idle", message: undefined }));
-      return;
     }
-
-    //const base = normalizeBaseUrl(gwRaw);
-    //startWs(base);
-
   }, [gateway.value]);
 
   const setValue = async (key: ConnKey, value: string) => {
@@ -244,34 +269,55 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     if (key === "aiserver") setAiServer((s) => ({ ...s, value: v }));
 
     try {
-      await AsyncStorage.setItem((STORAGE_KEYS as any)[key], v);
+      await AsyncStorage.setItem(STORAGE_KEYS[key], v);
     } catch {}
   };
 
   const connect = async (key: ConnKey) => {
     if (key === "gateway") {
-  const gw = normalizeBaseUrl(gateway.value.trim());
-  if (!gw) throw new Error("Gateway required.");
+      const gw = normalizeBaseUrl(gateway.value.trim());
+      if (!gw) throw new Error("Gateway required.");
 
-  setGateway((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
+      setGateway((s) => ({
+        ...s,
+        status: "connecting",
+        message: "Connecting...",
+      }));
 
-  const resp = await fetch(`${gw}/api/status`, { method: "GET" });
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || data?.ok === false) {
-    setGateway((s) => ({
-      ...s,
-      status: "error",
-      message: data?.message || `Gateway not reachable (HTTP ${resp.status}).`,
-    }));
-    return;
-  }
+      try {
+        const { resp, data } = await fetchJsonWithTimeout(
+          `${gw}/health`,
+          { method: "GET" },
+          CONNECT_TIMEOUT_MS
+        );
 
+        if (!resp.ok || data?.ok === false) {
+          setGateway((s) => ({
+            ...s,
+            status: "error",
+            message: data?.message || `Gateway not reachable (HTTP ${resp.status}).`,
+          }));
+          return;
+        }
 
-  startWs(gw);
+        startWs(gw);
 
-  setGateway((s) => ({ ...s, status: "connected", message: "Gateway connected.", lastOkAt: Date.now() }));
-  return;
-}
+        setGateway((s) => ({
+          ...s,
+          status: "connected",
+          message: "Gateway connected.",
+          lastOkAt: Date.now(),
+        }));
+        return;
+      } catch (e: any) {
+        setGateway((s) => ({
+          ...s,
+          status: "error",
+          message: toFriendlyErrorMessage(e, "Gateway connection failed."),
+        }));
+        return;
+      }
+    }
 
     const gw = normalizeBaseUrl(gateway.value.trim());
     if (!gw) throw new Error("Gateway required.");
@@ -280,44 +326,94 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
       const ip = robot.value.trim();
       if (!ip) throw new Error("Robot IP required.");
 
-      setRobot((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
+      setRobot((s) => ({
+        ...s,
+        status: "connecting",
+        message: "Connecting...",
+      }));
 
-      const resp = await fetch(`${gw}/api/robot/connect`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ip }),
-      });
+      try {
+        const { resp, data } = await fetchJsonWithTimeout(
+          `${gw}/api/robot/connect`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ip }),
+          },
+          CONNECT_TIMEOUT_MS
+        );
 
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || data?.ok === false) {
-        setRobot((s) => ({ ...s, status: "error", message: data?.message || `Robot connect failed (HTTP ${resp.status}).` }));
+        if (!resp.ok || data?.ok === false) {
+          setRobot((s) => ({
+            ...s,
+            status: "error",
+            message: data?.message || `Robot connect failed (HTTP ${resp.status}).`,
+          }));
+          return;
+        }
+
+        setRobot((s) => ({
+          ...s,
+          status: "connected",
+          message: "Robot connected via Gateway.",
+          lastOkAt: Date.now(),
+        }));
+        return;
+      } catch (e: any) {
+        setRobot((s) => ({
+          ...s,
+          status: "error",
+          message: toFriendlyErrorMessage(e, "Robot connection failed."),
+        }));
         return;
       }
-
-      setRobot((s) => ({ ...s, status: "connected", message: "Robot connected via Gateway.", lastOkAt: Date.now() }));
-      return;
     }
 
     if (key === "aiserver") {
       const url = normalizeBaseUrl(aiserver.value.trim());
       if (!url) throw new Error("AI Server URL required.");
 
-      setAiServer((s) => ({ ...s, status: "connecting", message: "Connecting..." }));
+      setAiServer((s) => ({
+        ...s,
+        status: "connecting",
+        message: "Connecting...",
+      }));
 
-      const resp = await fetch(`${gw}/api/ai_server/connect`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
+      try {
+        const { resp, data } = await fetchJsonWithTimeout(
+          `${gw}/api/ai_server/connect`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+          },
+          CONNECT_TIMEOUT_MS
+        );
 
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || data?.ok === false) {
-        setAiServer((s) => ({ ...s, status: "error", message: data?.message || `AI connect failed (HTTP ${resp.status}).` }));
+        if (!resp.ok || data?.ok === false) {
+          setAiServer((s) => ({
+            ...s,
+            status: "error",
+            message: data?.message || `AI connect failed (HTTP ${resp.status}).`,
+          }));
+          return;
+        }
+
+        setAiServer((s) => ({
+          ...s,
+          status: "connected",
+          message: "AI Server configured via Gateway.",
+          lastOkAt: Date.now(),
+        }));
+        return;
+      } catch (e: any) {
+        setAiServer((s) => ({
+          ...s,
+          status: "error",
+          message: toFriendlyErrorMessage(e, "AI Server connection failed."),
+        }));
         return;
       }
-
-      setAiServer((s) => ({ ...s, status: "connected", message: "AI Server configured via Gateway.", lastOkAt: Date.now() }));
-      return;
     }
   };
 
@@ -326,11 +422,15 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
 
     if (key === "gateway") {
       if (gw) {
-        await fetch(`${gw}/api/disconnect`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        }).catch(() => {});
+        await fetchJsonWithTimeout(
+          `${gw}/api/disconnect`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          },
+          DISCONNECT_TIMEOUT_MS
+        ).catch(() => {});
       }
 
       stopWs("manual");
@@ -345,20 +445,39 @@ export function ConnectionProvider({ children }: { children: React.ReactNode }) 
     if (!gw) throw new Error("Gateway required.");
 
     if (key === "robot") {
-      await fetch(`${gw}/api/robot/disconnect`, { method: "POST" }).catch(() => {});
+      await fetchJsonWithTimeout(
+        `${gw}/api/robot/disconnect`,
+        { method: "POST" },
+        DISCONNECT_TIMEOUT_MS
+      ).catch(() => {});
+
       setRobot((s) => ({ ...s, status: "idle", message: "Robot disconnected." }));
       return;
     }
 
     if (key === "aiserver") {
-      await fetch(`${gw}/api/ai_server/disconnect`, { method: "POST" }).catch(() => {});
+      await fetchJsonWithTimeout(
+        `${gw}/api/ai_server/disconnect`,
+        { method: "POST" },
+        DISCONNECT_TIMEOUT_MS
+      ).catch(() => {});
+
       setAiServer((s) => ({ ...s, status: "idle", message: "AI Server disconnected." }));
       return;
     }
   };
 
   const value = useMemo<ConnectionContextValue>(
-    () => ({ gateway, robot, aiserver, live, wsConnected, setValue, connect, disconnect }),
+    () => ({
+      gateway,
+      robot,
+      aiserver,
+      live,
+      wsConnected,
+      setValue,
+      connect,
+      disconnect,
+    }),
     [gateway, robot, aiserver, live, wsConnected]
   );
 
@@ -370,6 +489,3 @@ export function useConnection() {
   if (!ctx) throw new Error("useConnection must be used inside <ConnectionProvider />");
   return ctx;
 }
-
-
-

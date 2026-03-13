@@ -16,13 +16,28 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.osmanaktrk.InteractieveRobotArm",
       "adaptiveIcon": {
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.osmanaktrk.InteractieveRobotArm"
+      "permissions": ["INTERNET", "ACCESS_NETWORK_STATE"]
     },
+    "androidNavigationBar": {
+      "visible": "sticky-immersive",
+      "barStyle": "light-content"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
     "web": {
       "favicon": "./assets/robot_icon.png"
     },
