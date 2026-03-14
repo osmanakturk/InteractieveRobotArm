@@ -262,13 +262,82 @@ Before running the system ensure the following are available:
 
 
 3. Jetson Gateway Setup
+   **Jetson Orin Nano Specific Setup**
 
-   Create a virtual environment:
+   This project uses Intel RealSense D435i and OpenCV on a Jetson Orin Nano.
+   Before running the gateway, you must install the required camera and vision dependencies on the Jetson device.
+
+   #### RealSense Camera Installation (Jetson Orin Nano)
+
+   The RealSense SDK is built from source to ensure compatibility with Jetson (JetPack / Ubuntu).
+
+   Clone the RealSense repository:
+
    ```
-   cd jetson
-   python -m venv venv
-   source venv/bin/activate
+    cd ~
+    git clone https://github.com/IntelRealSense/librealsense.git
+    cd librealsense
    ```
+   Setup udev rules:
+
+   ```
+   ./scripts/setup_udev_rules.sh
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger
+   ```
+
+   Build the SDK:
+
+   ```
+   mkdir build
+   cd build
+
+   cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DFORCE_RSUSB_BACKEND=true \
+    -DBUILD_PYTHON_BINDINGS=ON \
+    -DBUILD_EXAMPLES=ON \
+    -DBUILD_GRAPHICAL_EXAMPLES=ON
+   ```
+
+   Compile and install:
+
+   ```
+   make -j$(nproc)
+   sudo make install
+   sudo ldconfig
+   ```
+
+   Enable Python bindings:
+
+   ```
+   export PYTHONPATH=$PYTHONPATH:~/librealsense/build/Release
+   ```
+
+   (Optional) Make this permanent:
+
+   ```
+   echo 'export PYTHONPATH=$PYTHONPATH:~/librealsense/build/Release' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+   Verify the installation:
+
+   ```
+   python3 -c "import pyrealsense2 as rs; print(rs.__version__)" 
+   ```
+
+   #### OpenCV Installation
+
+   For Jetson Orin Nano, we recommend using the optimized OpenCV installation guide provided by Qengineering.
+
+   Follow the instructions here:
+
+   https://qengineering.eu/install-opencv-on-orin-nano.html
+
+   This guide provides a Jetson-optimized OpenCV build with CUDA support.
+
+
    Install dependencies:
    ```
    pip install -r requirements.txt
@@ -278,7 +347,7 @@ Before running the system ensure the following are available:
    python main.py
    ```
 
-4. AI Server Setup
+5. AI Server Setup
 
    Create a virtual environment:
    ```
@@ -366,31 +435,208 @@ https://github.com/user-attachments/assets/f80cc5ea-600c-4894-8404-39dd5b1a89a9
 ---
 
 
-## API Overview
+## API Documentation
 
-The system exposes two REST APIs:
+The system exposes two main REST APIs:
 
-- **Jetson Gateway API**: responsible for robot control, camera management, and communication with the AI server.
-- **AI Server API**: responsible for AI-based grasp detection and pick-and-place task management.
+- **Jetson Gateway API**: the main entry point for the mobile application, responsible for robot control, camera management, AI proxy communication, and live monitoring.
+- **AI Server API**: responsible for AI mode management, grasp selection, and pick-and-place execution logic.
 
+The mobile application communicates primarily with the **Jetson Gateway API**, while the gateway forwards AI-related requests to the **AI Server API**.
 
+---
 
 ### Jetson Gateway API
 
-Main responsibilities:
-   - robot control
-   - camera streaming
-   - AI proxy communication
-   - system monitoring
+The **Jetson Gateway API** acts as the central communication layer of the system.
+
+#### Main responsibilities
+
+- robot connection and control
+- gripper control
+- RealSense camera management
+- MJPEG camera streaming
+- AI proxy communication
+- WebSocket-based live status monitoring
+
+#### Example base URL
+
+```text
+http://JETSON_IP:PORT
+```
+
+#### Main endpoints
+
+| **Endpoint** | **Method** | **Description** |
+| ------------ | ---------- | --------------- |
+| /health | GET | Checks whether the Jetson Gateway service is running |
+| /api/status |  GET | Returns system status including robot, camera, safety, and AI state |
+| /api/disconnect | POST | Resets the gateway state and disconnects robot, camera, and AI server |
+| /api/robot/connect | POST | Connects the gateway to the xArm6 robot |
+| /api/robot/disconnect | POST | Disconnects the robot |
+| /api/robot/enable | POST | Enables robot motion |
+| /api/robot/disable | POST | Disables robot motion |
+| /api/robot/stop | POST | Stops robot motion immediately |
+| /api/robot/home | POST | Sends the robot to its home position |
+| /api/robot/frame | POST | Sets the robot frame (base or tool) |
+| /api/robot/speed | POST | Sets the robot speed percentage |
+| /api/robot/jog | POST | Performs relative jog movement |
+| /api/robot/move_pose | POST | Moves the robot to an absolute Cartesian pose |
+| /api/robot/gripper/status | GET | Returns current gripper status |
+| /api/robot/gripper | POST | Opens or closes the gripper |
+| /api/robot/safety/clear | POST | Clears safety state |
+| /api/robot/vision_pose | POST | Moves the robot to the predefined vision pose |
+| /api/cameras/realsense/start | POST | Starts the RealSense camera |
+| /api/cameras/realsense/stop | POST | Stops the RealSense camera| 
+| /api/cameras/realsense/status | GET | Returns camera status |
+| /api/cameras/realsense/stream/mjpeg | GET | Provides live MJPEG camera stream |
+| /api/cameras/realsense/get_grasp_pack | POST | Returns cropped RGB/depth data for grasp estimation |
+| /api/ai_server/connect | POST | Connects the gateway to the AI server |
+| /api/ai_server/disconnect | POST | Disconnects the AI server |
+| /api/ai_server/modes/status | GET | Returns current AI mode status |
+| /api/ai_server/pick_place/select | POST | Sends grasp point selection to the AI server |
+| /api/ai_server/pick_place/execute | POST | Executes a pick or place operation |
+| /api/ai_server/pick_place/cancel | POST | Cancels the active pick-and-place task |
+| /api/ai_server/pick_place/reset | POST | Resets the pick-and-place workflow state |
+| /api/ai_server/pick_place/status | GET | Returns current pick-and-place status |
+| /ws/status | WebSocket | Streams live robot, camera, and AI status |
 
 
+Example request bodies
+**Robot connect**
+```
+{
+  "ip": "192.168.1.201"
+}
+```
+
+**Robot jog**
+```
+{
+  "dx": 5,
+  "dy": 0,
+  "dz": 0,
+  "droll": 0,
+  "dpitch": 0,
+  "dyaw": 0
+}
+```
+
+**Gripper control**
+```
+{
+  "action": "open"
+}
+```
+
+**AI server connect**
+```
+{
+  "url": "http://192.168.1.30:9000"
+}
+```
+
+**Pick-place select**
+```
+{
+  "u": 0.52,
+  "v": 0.41,
+  "source": "realsense_mjpeg",
+  "ts": 1710000000
+}
+```
+
+**Pick-place execute**
+```
+{
+  "action": "pick",
+  "selection_id": "sel_12345"
+}
+```
 
 ### AI Server API
 
-Responsibilities:
-   - AI mode management
-   - grasp selection
-   - pick-and-place execution
+The AI Server API is responsible for AI-related operations such as mode management and grasp execution.
+
+Main responsibilities
+- AI mode lifecycle management
+- pick-and-place workflow execution
+- GG-CNN based grasp processing
+- worker process orchestration
+
+
+**Example base URL**
+```
+http://AI_SERVER_IP:PORT
+```
+
+
+#### Main endpoints
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| /health | GET | Checks whether the AI server is running |
+| /api/ai_server/modes/status | GET | Returns active and available AI modes |
+| /api/ai_server/modes/start | POST | Starts an AI mode such as pick_and_place |
+| /api/ai_server/modes/stop | POST | Stops the active AI mode |
+| /api/ai_server/pick_place/select | POST | Registers a target point for grasp planning |
+| /api/ai_server/pick_place/execute | POST | Executes a pick or place action |
+| /api/ai_server/pick_place/cancel | POST | Cancels the active workflow |
+| /api/ai_server/pick_place/reset | POST | Resets workflow state |
+| /api/ai_server/pick_place/status | GET | Returns current workflow status |
+
+
+Example request bodies
+
+**Start mode**
+```
+{
+  "mode": "pick_and_place",
+  "gateway_url": "http://192.168.1.43:8000"
+}
+```
+
+**Stop mode**
+```
+{
+  "mode": "pick_and_place"
+}
+```
+
+**Select target**
+```
+{
+  "u": 0.52,
+  "v": 0.41,
+  "source": "realsense_mjpeg",
+  "ts": 1710000000
+}
+```
+
+
+**Execute action**
+```
+{
+  "action": "pick",
+  "selection_id": "sel_12345"
+}
+```
+
+
+#### Typical API Workflow
+
+A typical pick-and-place workflow proceeds as follows:
+ 1.	The mobile application connects to the Jetson Gateway API
+ 2.	The gateway connects to the xArm6 robot and the RealSense camera
+ 3.	The gateway connects to the AI Server API
+ 4.	The AI server starts the pick_and_place mode
+ 5.	The user selects a target point from the live camera stream
+ 6.	The selection is sent to the AI server through the gateway
+ 7.	The AI server performs GG-CNN based grasp estimation
+ 8.	The gateway sends the resulting motion command to the robot
+ 9.	The robot executes the pick or place action
+ 10.	Live status is monitored through /api/status or /ws/status
+
 
 
 ---
